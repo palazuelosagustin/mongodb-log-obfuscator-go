@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"time"
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
@@ -15,19 +16,41 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" {
-		usage()
-		return
-	}
-	if os.Args[1] != "obfuscate" {
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
-		usage()
+	args, ok := obfuscateArgs(os.Args[1:])
+	if !ok {
 		os.Exit(2)
 	}
-	if err := obfuscate(os.Args[2:]); err != nil {
+	if args == nil {
+		return
+	}
+	if err := obfuscate(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func obfuscateArgs(args []string) ([]string, bool) {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
+		usage()
+		return nil, true
+	}
+	if args[0] == "obfuscate" {
+		return args[1:], true
+	}
+	if strings.HasPrefix(args[0], "-") || looksLikeInput(args[0]) {
+		return args, true
+	}
+	fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
+	usage()
+	return nil, false
+}
+
+func looksLikeInput(arg string) bool {
+	if strings.ContainsAny(arg, string(filepath.Separator)+".*?") {
+		return true
+	}
+	_, err := os.Stat(arg)
+	return err == nil
 }
 func obfuscate(args []string) error {
 	fs := flag.NewFlagSet("obfuscate", flag.ExitOnError)
@@ -170,7 +193,7 @@ func startProfile(dir string) (func(), error) {
 }
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  mongodb-log-obfuscator-go obfuscate [flags] INPUT...
+  mongodb-log-obfuscator-go [obfuscate] [flags] INPUT...
 
 Flags:
   --out, -o, --output-dir DIR   Root directory for obfuscated output

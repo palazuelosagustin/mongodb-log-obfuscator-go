@@ -6,8 +6,11 @@ shared mapping across all inputs.
 ## Usage
 
 ```bash
+go run ./cmd/mongodb-log-obfuscator-go /path/to/support-bundle
+go run ./cmd/mongodb-log-obfuscator-go --out /tmp/sanitized --mapping /tmp/mapping.json /path/to/node1.log /path/to/diagnostic.data
+
+# explicit subcommand form also works
 go run ./cmd/mongodb-log-obfuscator-go obfuscate /path/to/support-bundle
-go run ./cmd/mongodb-log-obfuscator-go obfuscate --out /tmp/sanitized --mapping /tmp/mapping.json /path/to/node1.log /path/to/diagnostic.data
 ```
 
 Useful flags:
