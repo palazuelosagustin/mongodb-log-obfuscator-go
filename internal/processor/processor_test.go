@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,8 +85,8 @@ func TestRunRedactsJSONCommandPayloadsWithoutMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.PayloadRedactions != 7 {
-		t.Fatalf("PayloadRedactions = %d, want 7", summary.PayloadRedactions)
+	if summary.PayloadRedactions != 15 {
+		t.Fatalf("PayloadRedactions = %d, want 15", summary.PayloadRedactions)
 	}
 	obfuscatedLog, err := os.ReadFile(filepath.Join(out, "mongod_obfuscated.log"))
 	if err != nil {
@@ -103,29 +104,56 @@ func TestRunRedactsJSONCommandPayloadsWithoutMapping(t *testing.T) {
 	}
 	firstAttr := first["attr"].(map[string]any)
 	firstCommand := firstAttr["command"].(map[string]any)
-	if got := firstCommand["updates"].([]any); len(got) != 1 || got[0] != redact.Placeholder {
-		t.Fatalf("updates not redacted: %#v", firstCommand["updates"])
+	updates := firstCommand["updates"].([]any)
+	if len(updates) != 1 {
+		t.Fatalf("updates length = %d, want 1", len(updates))
+	}
+	firstUpdate := updates[0].(map[string]any)
+	firstQ := firstUpdate["q"].(map[string]any)
+	if firstQ["phone"] != redact.StringPlaceholder {
+		t.Fatalf("query shape not preserved/redacted: %#v", firstQ)
+	}
+	firstSet := firstUpdate["u"].(map[string]any)["$set"].(map[string]any)
+	for _, key := range []string{"emailBody", "smsBody", "merchant"} {
+		if firstSet[key] != redact.StringPlaceholder {
+			t.Fatalf("update field %s not scalar-redacted: %#v", key, firstSet)
+		}
 	}
 	if _, ok := firstCommand["update"].(string); !ok {
 		t.Fatalf("command name update not preserved")
 	}
 	secondCommand := second["attr"].(map[string]any)["command"].(map[string]any)
-	for _, key := range []string{"query", "update", "let"} {
-		red, ok := secondCommand[key].(map[string]any)
-		if !ok || red["redacted"] != redact.Placeholder {
-			t.Fatalf("%s not redacted: %#v", key, secondCommand[key])
-		}
+	secondQuery := secondCommand["query"].(map[string]any)
+	if secondQuery["cardEnding"] != redact.StringPlaceholder || secondQuery["merchant"] != redact.StringPlaceholder {
+		t.Fatalf("query fields not preserved/redacted: %#v", secondQuery)
+	}
+	secondUpdate := secondCommand["update"].(map[string]any)["$set"].(map[string]any)["template"].(map[string]any)
+	if secondUpdate["content"] != redact.StringPlaceholder {
+		t.Fatalf("nested update not preserved/redacted: %#v", secondCommand["update"])
+	}
+	secondLet := secondCommand["let"].(map[string]any)["channelOptions"].(map[string]any)
+	if secondLet["emailBodyText"] != redact.StringPlaceholder {
+		t.Fatalf("let not preserved/redacted: %#v", secondCommand["let"])
 	}
 	truncated := third["attr"].(map[string]any)["truncated"].(map[string]any)["command"].(map[string]any)
-	if got := truncated["documents"].([]any); len(got) != 1 || got[0] != redact.Placeholder {
-		t.Fatalf("documents not redacted: %#v", truncated)
+	documents := truncated["documents"].([]any)
+	if len(documents) != 1 {
+		t.Fatalf("documents length = %d, want 1", len(documents))
+	}
+	doc := documents[0].(map[string]any)
+	if doc["body"] != redact.StringPlaceholder || doc["phoneNumber"] != redact.StringPlaceholder {
+		t.Fatalf("documents not scalar-redacted: %#v", documents)
 	}
 	fourthCommand := fourth["attr"].(map[string]any)["command"].(map[string]any)
-	for _, key := range []string{"q", "u"} {
-		red, ok := fourthCommand[key].(map[string]any)
-		if !ok || red["redacted"] != redact.Placeholder {
-			t.Fatalf("%s not redacted: %#v", key, fourthCommand[key])
+	fourthQ := fourthCommand["q"].(map[string]any)
+	for _, key := range []string{"device_id", "seed", "user_id"} {
+		if fourthQ[key] != redact.StringPlaceholder {
+			t.Fatalf("q field %s not scalar-redacted: %#v", key, fourthQ)
 		}
+	}
+	fourthSet := fourthCommand["u"].(map[string]any)["$set"].(map[string]any)
+	if fourthSet["last_authenticated_at"] != float64(0) || fourthSet["seed"] != redact.StringPlaceholder {
+		t.Fatalf("u fields not type-redacted: %#v", fourthSet)
 	}
 	mapping, err := os.ReadFile(filepath.Join(out, "cluster_mapping.json"))
 	if err != nil {
@@ -138,6 +166,49 @@ func TestRunRedactsJSONCommandPayloadsWithoutMapping(t *testing.T) {
 		if strings.Contains(string(mapping), needle) {
 			t.Fatalf("payload %q was written to mapping", needle)
 		}
+	}
+}
+
+func TestObfuscatedSlowQueryWorksWithMongoDBLogstatQueryReport(t *testing.T) {
+	logstatPath := "/home/agustin.palazuelos/bin/mongodb-logstat/mongodb-logstat"
+	if _, err := os.Stat(logstatPath); err != nil {
+		t.Skipf("mongodb-logstat not available: %v", err)
+	}
+	root := t.TempDir()
+	logPath := filepath.Join(root, "mongod.log")
+	line := `{"t":{"$date":"2026-06-30T12:00:00.017Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn42","msg":"Slow query","attr":{"type":"command","ns":"payments.cronLock","command":{"find":"cronLock","filter":{"key":"fallback_cron_lock","lastRun":{"$lt":{"$date":"2026-06-30T07:59:57Z"}}},"limit":1,"singleBatch":true},"planSummary":"IXSCAN { key: 1, lastRun: 1 }","keysExamined":2,"docsExamined":1,"nreturned":1,"durationMillis":12}}` + "\n"
+	if err := os.WriteFile(logPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "out")
+	if _, err := Run(Config{Files: []inputs.File{{Path: logPath, Type: inputs.Log}}, InputRoot: root, OutputRoot: out, MappingPath: filepath.Join(out, "cluster_mapping.json"), Jobs: 1, Registry: registry.New()}); err != nil {
+		t.Fatal(err)
+	}
+	obfuscatedPath := filepath.Join(out, "mongod_obfuscated.log")
+	obfuscated, err := os.ReadFile(obfuscatedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"key", "lastRun", "$lt"} {
+		if !bytes.Contains(obfuscated, []byte(needle)) {
+			t.Fatalf("obfuscated log missing %q: %s", needle, obfuscated)
+		}
+	}
+	output, err := exec.Command(logstatPath, "--report", "queries", "--json", obfuscatedPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("mongodb-logstat failed: %v\n%s", err, output)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(output, &report); err != nil {
+		t.Fatalf("invalid mongodb-logstat JSON: %v\n%s", err, output)
+	}
+	diagnostics := report["diagnostics"].(map[string]any)
+	if diagnostics["acceptedSlowOperations"] != float64(1) {
+		t.Fatalf("acceptedSlowOperations = %#v, report: %s", diagnostics["acceptedSlowOperations"], output)
+	}
+	rows := report["rows"].([]any)
+	if len(rows) == 0 {
+		t.Fatalf("expected at least one query row: %s", output)
 	}
 }
 
@@ -196,8 +267,8 @@ func TestRunRedactsFTDCPayloadsAndPreservesDeltaStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.PayloadRedactions != 1 {
-		t.Fatalf("PayloadRedactions = %d, want 1", summary.PayloadRedactions)
+	if summary.PayloadRedactions != 4 {
+		t.Fatalf("PayloadRedactions = %d, want 4", summary.PayloadRedactions)
 	}
 	outFTDC, err := os.ReadFile(filepath.Join(out, "diagnostic.data", "metrics.2"))
 	if err != nil {
@@ -224,8 +295,22 @@ func TestRunRedactsFTDCPayloadsAndPreservesDeltaStream(t *testing.T) {
 	}
 	command, _ := bsonDocField(ref, "command")
 	docsValue, _ := bsonArrayField(command, "documents")
-	if len(docsValue) != 1 || docsValue[0] != redact.Placeholder {
-		t.Fatalf("documents not redacted: %#v", command)
+	if len(docsValue) != 2 {
+		t.Fatalf("documents length = %d, want 2: %#v", len(docsValue), command)
+	}
+	firstDoc, ok := docsValue[0].(bson.D)
+	if !ok {
+		t.Fatalf("first document is %T", docsValue[0])
+	}
+	if bsonStringValue(firstDoc, "emailBody") != redact.StringPlaceholder || bsonInt64Value(firstDoc, "amount") != 0 || bsonBoolValue(firstDoc, "sent") {
+		t.Fatalf("first document not type-redacted: %#v", firstDoc)
+	}
+	secondDoc, ok := docsValue[1].(bson.D)
+	if !ok {
+		t.Fatalf("second document is %T", docsValue[1])
+	}
+	if bsonStringValue(secondDoc, "phoneNumber") != redact.StringPlaceholder {
+		t.Fatalf("second document not redacted: %#v", secondDoc)
 	}
 	wc, _ := bsonDocField(command, "writeConcern")
 	if bsonStringValue(wc, "w") != "majority" {
@@ -262,7 +347,7 @@ func buildFTDC(t *testing.T, delta []byte) []byte {
 }
 func buildPayloadFTDC(t *testing.T, delta []byte) []byte {
 	t.Helper()
-	ref, err := bson.Marshal(bson.D{{Key: "command", Value: bson.D{{Key: "insert", Value: "notifications"}, {Key: "documents", Value: bson.A{bson.D{{Key: "emailBody", Value: "Card Ending 9999"}}}}, {Key: "writeConcern", Value: bson.D{{Key: "w", Value: "majority"}}}}}, {Key: "opcounters", Value: bson.D{{Key: "insert", Value: int64(123)}}}})
+	ref, err := bson.Marshal(bson.D{{Key: "command", Value: bson.D{{Key: "insert", Value: "notifications"}, {Key: "documents", Value: bson.A{bson.D{{Key: "emailBody", Value: "Card Ending 9999"}, {Key: "amount", Value: int32(25)}, {Key: "sent", Value: true}}, bson.D{{Key: "phoneNumber", Value: "+966555333444"}}}}, {Key: "writeConcern", Value: bson.D{{Key: "w", Value: "majority"}}}}}, {Key: "opcounters", Value: bson.D{{Key: "insert", Value: int64(123)}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,6 +388,16 @@ func bsonStringValue(doc bson.D, key string) string {
 	}
 	return ""
 }
+func bsonBoolValue(doc bson.D, key string) bool {
+	for _, e := range doc {
+		if e.Key == key {
+			v, _ := e.Value.(bool)
+			return v
+		}
+	}
+	return false
+}
+
 func bsonInt64Value(doc bson.D, key string) int64 {
 	for _, e := range doc {
 		if e.Key == key {

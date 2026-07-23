@@ -15,6 +15,21 @@ func TestApplyLongestFirstReplacementTable(t *testing.T) {
 	}
 }
 
+func TestApplyDoesNotReplaceIdentifierSubstrings(t *testing.T) {
+	m := New([]registry.Replacement{
+		{Original: "26", Value: "database812"},
+		{Original: "COM", Value: "collection8"},
+		{Original: "com", Value: "collection23"},
+		{Original: "mail", Value: "host25"},
+	})
+	input := `{"t":{"$date":"2026-06-30T12:00:00Z"},"c":"COMMAND","attr":{"command":{"find":"users"},"emailBody":"mail sent"}}`
+	got := m.Apply(input)
+	want := `{"t":{"$date":"2026-06-30T12:00:00Z"},"c":"COMMAND","attr":{"command":{"find":"users"},"emailBody":"host25 sent"}}`
+	if got != want {
+		t.Fatalf("Apply() = %q, want %q", got, want)
+	}
+}
+
 func BenchmarkApplyLargeMapping(b *testing.B) {
 	var reps []registry.Replacement
 	for i := 0; i < 1000; i++ {

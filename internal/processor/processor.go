@@ -424,8 +424,9 @@ func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 			out[i].key = member.key
 			child := inCommand || redact.CommandContext(member.key)
 			if redact.PayloadField(member.key, member.value, child) {
-				out[i].value = redactJSONValue(member.value)
-				total++
+				repl, n := redactJSONValue(member.value)
+				out[i].value = repl
+				total += n
 				continue
 			}
 			repl, n := obfuscateJSON(member.value, matcher, child)
@@ -449,17 +450,68 @@ func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 	}
 }
 
-func redactJSONValue(value any) any {
-	switch value.(type) {
-	case []any:
-		return []any{redact.Placeholder}
+func redactJSONValue(value any) (any, int) {
+	return redactJSONPayload(value, "")
+}
+
+func redactJSONPayload(value any, parentKey string) (any, int) {
+	switch x := value.(type) {
 	case jsonObject:
-		return jsonObject{{key: "redacted", value: redact.Placeholder}}
+		out := make(jsonObject, len(x))
+		total := 0
+		for i, member := range x {
+			out[i].key = member.key
+			repl, n := redactJSONPayload(member.value, member.key)
+			out[i].value = repl
+			total += n
+		}
+		return out, total
+	case []any:
+		out := make([]any, len(x))
+		total := 0
+		for i, item := range x {
+			repl, n := redactJSONPayload(item, parentKey)
+			out[i] = repl
+			total += n
+		}
+		return out, total
 	case string:
-		return redact.Placeholder
+		after := jsonStringPlaceholder(parentKey)
+		return after, countStringChange(x, after)
+	case json.Number:
+		return json.Number("0"), countStringChange(x.String(), "0")
+	case bool:
+		if x {
+			return false, 1
+		}
+		return false, 0
+	case nil:
+		return nil, 0
 	default:
-		return redact.Placeholder
+		return redact.StringPlaceholder, 1
 	}
+}
+
+func jsonStringPlaceholder(parentKey string) string {
+	switch parentKey {
+	case "$date":
+		return "1970-01-01T00:00:00Z"
+	case "$oid":
+		return "000000000000000000000000"
+	case "$uuid":
+		return "00000000-0000-0000-0000-000000000000"
+	case "$numberLong", "$numberInt", "$numberDouble", "$numberDecimal":
+		return "0"
+	default:
+		return redact.StringPlaceholder
+	}
+}
+
+func countStringChange(before, after string) int {
+	if before == after {
+		return 0
+	}
+	return 1
 }
 
 func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D, int) {
@@ -469,8 +521,9 @@ func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D
 		out[i].Key = elem.Key
 		child := inCommand || redact.CommandContext(elem.Key)
 		if redact.PayloadField(elem.Key, elem.Value, child) {
-			out[i].Value = redact.ValueBSON(elem.Value)
-			total++
+			repl, n := redactBSONPayload(elem.Value, "")
+			out[i].Value = repl
+			total += n
 			continue
 		}
 		repl, n := obfuscateValue(elem.Value, matcher, child)
@@ -479,6 +532,7 @@ func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D
 	}
 	return out, total
 }
+
 func obfuscateValue(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 	switch x := v.(type) {
 	case string:
@@ -496,5 +550,110 @@ func obfuscateValue(v any, matcher *replace.Matcher, inCommand bool) (any, int) 
 		return out, total
 	default:
 		return v, 0
+	}
+}
+
+func redactBSONPayload(value any, parentKey string) (any, int) {
+	switch x := value.(type) {
+	case bson.D:
+		out := make(bson.D, len(x))
+		total := 0
+		for i, elem := range x {
+			out[i].Key = elem.Key
+			repl, n := redactBSONPayload(elem.Value, elem.Key)
+			out[i].Value = repl
+			total += n
+		}
+		return out, total
+	case bson.A:
+		out := make(bson.A, len(x))
+		total := 0
+		for i, item := range x {
+			repl, n := redactBSONPayload(item, parentKey)
+			out[i] = repl
+			total += n
+		}
+		return out, total
+	case []any:
+		out := make(bson.A, len(x))
+		total := 0
+		for i, item := range x {
+			repl, n := redactBSONPayload(item, parentKey)
+			out[i] = repl
+			total += n
+		}
+		return out, total
+	case string:
+		after := jsonStringPlaceholder(parentKey)
+		return after, countStringChange(x, after)
+	case bool:
+		if x {
+			return false, 1
+		}
+		return false, 0
+	case int:
+		if x == 0 {
+			return 0, 0
+		}
+		return 0, 1
+	case int32:
+		if x == 0 {
+			return int32(0), 0
+		}
+		return int32(0), 1
+	case int64:
+		if x == 0 {
+			return int64(0), 0
+		}
+		return int64(0), 1
+	case float32:
+		if x == 0 {
+			return float32(0), 0
+		}
+		return float32(0), 1
+	case float64:
+		if x == 0 {
+			return float64(0), 0
+		}
+		return float64(0), 1
+	case primitive.DateTime:
+		if x == 0 {
+			return primitive.DateTime(0), 0
+		}
+		return primitive.DateTime(0), 1
+	case primitive.ObjectID:
+		zero := primitive.NilObjectID
+		if x == zero {
+			return zero, 0
+		}
+		return zero, 1
+	case primitive.Timestamp:
+		zero := primitive.Timestamp{}
+		if x == zero {
+			return zero, 0
+		}
+		return zero, 1
+	case primitive.Decimal128:
+		zero, _ := primitive.ParseDecimal128("0")
+		if x == zero {
+			return zero, 0
+		}
+		return zero, 1
+	case primitive.Binary:
+		zero := primitive.Binary{Subtype: x.Subtype, Data: make([]byte, len(x.Data))}
+		if bytes.Equal(x.Data, zero.Data) {
+			return zero, 0
+		}
+		return zero, 1
+	case primitive.Regex:
+		zero := primitive.Regex{Pattern: redact.StringPlaceholder}
+		if x == zero {
+			return zero, 0
+		}
+		return zero, 1
+	case nil:
+		return nil, 0
+	default:
+		return redact.StringPlaceholder, 1
 	}
 }

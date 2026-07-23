@@ -10,6 +10,7 @@ import (
 )
 
 const Placeholder = "obfuscated payload"
+const StringPlaceholder = "obfuscated string"
 
 var commandContextKeys = set("command", "cmdObj", "originatingCommand")
 var commandVerbKeys = set("find", "aggregate", "insert", "update", "delete", "findAndModify", "count", "distinct", "getMore", "explain", "create", "drop", "renameCollection", "createIndexes", "dropIndexes", "collMod")
