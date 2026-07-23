@@ -141,6 +141,32 @@ func TestRunRedactsJSONCommandPayloadsWithoutMapping(t *testing.T) {
 	}
 }
 
+func TestReplaceLogLinePreservesMongoLogFieldOrder(t *testing.T) {
+	line := `{"t":{"date":"2026-06-30T12:00:00.017+04:00"},"s":"W",  "c":"COMMAND",  "id":23802,   "ctx":"conn485182","msg":"Plan executor error during findAndModify","attr":{"error":{"code":11000,"codeName":"DuplicateKey"},"stats":{"stage":"UPDATE","nReturned":0,"executionTimeMillisEstimate":0},"cmd":{"findAndModify":"cronLock","query":{"key":"fallback_cron_lock"},"remove":false,"update":{"set":{"lastRun":{"date":"2026-06-30T08:00:00.012Z"}}},"upsert":true,"new":false}}}` + "\n"
+	repl, _, err := replaceLogLine(line, replace.New(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertKeyOrder(t, repl, "\"t\"", "\"s\"", "\"c\"", "\"id\"", "\"ctx\"", "\"msg\"", "\"attr\"")
+	assertKeyOrder(t, repl, "\"error\"", "\"stats\"", "\"cmd\"")
+	assertKeyOrder(t, repl, "\"stage\"", "\"nReturned\"", "\"executionTimeMillisEstimate\"")
+}
+
+func assertKeyOrder(t *testing.T, text string, keys ...string) {
+	t.Helper()
+	last := -1
+	for _, key := range keys {
+		idx := strings.Index(text, key)
+		if idx < 0 {
+			t.Fatalf("missing key %s in %s", key, text)
+		}
+		if idx <= last {
+			t.Fatalf("key %s is out of order in %s", key, text)
+		}
+		last = idx
+	}
+}
+
 func TestReplaceLogLineDirectPayloadFallback(t *testing.T) {
 	line := `command: { documents: [{ emailBody: "Card Ending 5555" }], phoneNumber: "+966555999888" }` + "\n"
 	redacted, count, err := replaceLogLine(line, replace.New(nil))

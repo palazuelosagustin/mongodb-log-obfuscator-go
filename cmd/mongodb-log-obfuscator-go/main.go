@@ -98,7 +98,11 @@ func obfuscate(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "Input root:   %s\n", inputRoot)
 	fmt.Fprintf(os.Stderr, "Output root:  %s\n", outputRoot)
-	fmt.Fprintf(os.Stderr, "Mapping file: %s\n\n", mapping)
+	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
+	if len(files) == 1 {
+		fmt.Fprintf(os.Stderr, "Obfuscated file: %s\n", inputs.OutputPath(files[0].Path, inputRoot, outputRoot, files[0].Type))
+	}
+	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Found %d file(s)\n", len(files))
 	start := time.Now()
 	summary, err := processor.Run(processor.Config{Files: files, InputRoot: inputRoot, OutputRoot: outputRoot, MappingPath: mapping, Jobs: jobs, DryRun: dryRun, Registry: reg})

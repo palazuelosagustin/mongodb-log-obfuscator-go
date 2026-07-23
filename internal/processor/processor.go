@@ -2,6 +2,7 @@ package processor
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -299,8 +300,8 @@ func replaceLogLine(line string, matcher *replace.Matcher) (string, int, error) 
 		newline = "\r" + newline
 		raw = strings.TrimSuffix(raw, "\r")
 	}
-	var obj map[string]any
-	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+	obj, err := parseOrderedJSON([]byte(raw))
+	if err != nil {
 		repl := matcher.Apply(line)
 		redacted, n := redact.DirectText(repl)
 		return redacted, n, nil
@@ -312,20 +313,123 @@ func replaceLogLine(line string, matcher *replace.Matcher) (string, int, error) 
 	}
 	return string(enc) + newline, n, nil
 }
+
+type jsonObject []jsonMember
+
+type jsonMember struct {
+	key   string
+	value any
+}
+
+func parseOrderedJSON(raw []byte) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	value, err := parseJSONValue(dec)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	} else if err == nil {
+		return nil, fmt.Errorf("unexpected trailing JSON")
+	}
+	return value, nil
+}
+
+func parseJSONValue(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); ok {
+		switch delim {
+		case json.Delim(123):
+			var obj jsonObject
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return nil, err
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return nil, fmt.Errorf("object key is %T", keyTok)
+				}
+				value, err := parseJSONValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				obj = append(obj, jsonMember{key: key, value: value})
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			if end != json.Delim(125) {
+				return nil, fmt.Errorf("unexpected object terminator %v", end)
+			}
+			return obj, nil
+		case json.Delim(91):
+			var arr []any
+			for dec.More() {
+				value, err := parseJSONValue(dec)
+				if err != nil {
+					return nil, err
+				}
+				arr = append(arr, value)
+			}
+			end, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			if end != json.Delim(93) {
+				return nil, fmt.Errorf("unexpected array terminator %v", end)
+			}
+			return arr, nil
+		default:
+			return nil, fmt.Errorf("unexpected delimiter %q", delim)
+		}
+	}
+	return tok, nil
+}
+
+func (obj jsonObject) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte(123)
+	for i, member := range obj {
+		if i > 0 {
+			buf.WriteByte(44)
+		}
+		key, err := json.Marshal(member.key)
+		if err != nil {
+			return nil, err
+		}
+		value, err := json.Marshal(member.value)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteByte(58)
+		buf.Write(value)
+	}
+	buf.WriteByte(125)
+	return buf.Bytes(), nil
+}
+
 func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 	switch x := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(x))
+	case jsonObject:
+		out := make(jsonObject, len(x))
 		total := 0
-		for key, value := range x {
-			child := inCommand || redact.CommandContext(key)
-			if redact.PayloadField(key, value, child) {
-				out[key] = redact.ValueJSON(value)
+		for i, member := range x {
+			out[i].key = member.key
+			child := inCommand || redact.CommandContext(member.key)
+			if redact.PayloadField(member.key, member.value, child) {
+				out[i].value = redactJSONValue(member.value)
 				total++
 				continue
 			}
-			repl, n := obfuscateJSON(value, matcher, child)
-			out[key] = repl
+			repl, n := obfuscateJSON(member.value, matcher, child)
+			out[i].value = repl
 			total += n
 		}
 		return out, total
@@ -344,6 +448,20 @@ func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 		return v, 0
 	}
 }
+
+func redactJSONValue(value any) any {
+	switch value.(type) {
+	case []any:
+		return []any{redact.Placeholder}
+	case jsonObject:
+		return jsonObject{{key: "redacted", value: redact.Placeholder}}
+	case string:
+		return redact.Placeholder
+	default:
+		return redact.Placeholder
+	}
+}
+
 func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D, int) {
 	out := make(bson.D, len(doc))
 	total := 0
