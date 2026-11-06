@@ -96,6 +96,11 @@ Useful flags:
   parallel and written in order, so one large log also uses every worker.
 - `--profile`: directory for `cpu.pprof` and `mem.pprof`.
 - `--dry-run`: discover and summarize without writing output.
+- `--from TIME`, `--to TIME`: keep only the log lines and FTDC data of a time
+  window, `--from` inclusive and `--to` exclusive, in the formats of
+  `mongodb-logstat` and `mongodb-ftdcstat`: RFC3339 (`2026-11-04T13:30:00Z`,
+  `2026-11-04T10:30:00-03:00`) or UTC without zone (`2026-11-04T13:30`,
+  `2026-11-04`). See "Time range" below.
 - `--log-only`, `--ftdc-only`: restrict input types.
 - `--verify`: check the written output for possible leaks (see below).
 - `--keep-equality`: redacted strings become keyed hashes (`obf_3f9a2c1b7d4e`)
@@ -126,6 +131,23 @@ text, empty files. Hidden files, earlier outputs and mapping files are
 ignored. A file that cannot be read is listed as failed and not written; the
 other files are written and the exit status is 1. FTDC files are streamed
 one document at a time, so memory does not grow with their size.
+
+### Time range
+
+With `--from`/`--to`, only what falls in the window is read closely and
+written; the rest of each file is still read but not parsed, obfuscated or
+written, so a narrow window over a large log is fast and the output small.
+
+- Log lines are selected by their `"t"` timestamp. Lines without one
+  (configuration files, command output) are kept.
+- An FTDC metric chunk is kept when the time it covers (from its `_id` to the
+  next chunk's) meets the window; the last chunk of a file is assumed to cover
+  as long as the one before it. Metadata documents are kept before the first
+  kept chunk, periodic metadata inside the window.
+- Names that only appear outside the window are not discovered, so they are
+  not in the mapping either.
+- Files with nothing in the window are not written and are listed; the summary
+  counts the log lines and FTDC chunks left out.
 
 Log files are written as `*_obfuscated.log`. FTDC files keep their relative
 paths under the output root. Mapped names in file and directory names are

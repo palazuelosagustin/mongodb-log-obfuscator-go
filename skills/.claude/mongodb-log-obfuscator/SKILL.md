@@ -56,6 +56,11 @@ too.
    `mongodb-log-obfuscator-go --verify --out CASE/obfuscated CASE/node1.log CASE/node2/diagnostic.data`.
    Add `--keep-equality` when equal values must stay recognisable (hot keys,
    skewed filters, the same document updated repeatedly).
+   When the incident window is known, add `--from`/`--to` (same formats as
+   `mongodb-logstat`; `--from` inclusive, `--to` exclusive) with some margin
+   before and after: less is exposed, and a large log is done much faster.
+   Lines without a timestamp are kept; files with nothing in the window are
+   listed as not written.
 3. Read the exit status and the stderr summary:
 
    | exit | meaning | do |

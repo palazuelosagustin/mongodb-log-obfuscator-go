@@ -25,3 +25,4 @@ First versioned release.
   skipped; a failed file does not stop the others.
 - `--jobs` workers process files and blocks of large files in parallel.
 - `--version`; the version is saved in the mapping.
+- `--from`/`--to`: keep only the log lines and FTDC chunks of a time window.
