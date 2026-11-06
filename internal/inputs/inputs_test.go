@@ -3,6 +3,7 @@ package inputs
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,5 +40,28 @@ func mustWrite(t *testing.T, path, data string) {
 	}
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResolveFileAndDirectoryStayBelowOutputRoot(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(root, "case", "mongod.log")
+	ftdcPath := filepath.Join(root, "case", "diag", "diagnostic.data", "metrics.1")
+	mustWrite(t, logPath, "{}\n")
+	mustWrite(t, ftdcPath, "\x00")
+	files, inputRoot, err := Resolve([]string{logPath, filepath.Dir(filepath.Dir(ftdcPath))}, filepath.Join(root, "out"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files = %v", files)
+	}
+	for _, f := range files {
+		if rel := OutputRel(f.Path, inputRoot, f.Type); strings.HasPrefix(rel, "..") {
+			t.Fatalf("%s would be written outside the output root: %s", f.Path, rel)
+		}
+	}
+	if got := OutputRel("/elsewhere/x.log", inputRoot, Log); got != "x_obfuscated.log" {
+		t.Fatalf("outside file maps to %q", got)
 	}
 }

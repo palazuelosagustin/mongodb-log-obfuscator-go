@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"go.mongodb.org/mongo-driver/bson"
@@ -109,19 +110,29 @@ var reUUIDLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{
 var hostKeys = set("host", "hostAndPort", "hostName", "syncSource", "syncSourceHost", "syncSourceCandidate", "candidateNode", "candidate", "peer", "newSyncSource", "oldSyncSource", "previousSyncSource", "currentSyncSource", "unsupportedSyncSource", "syncTarget", "remoteHost", "senderHost", "donorHost", "addr", "address", "server", "serverAddress", "serverHost", "endpoint", "localEndpoint", "primary", "newPrimary", "targetPrimary", "node", "failedHost", "sniName", "me")
 var remoteLocalKeys = set("remote", "local", "remoteAddr", "remoteSocketAddress", "remoteString", "remoteAddress", "sourceClient")
 var namespaceKeys = set("ns", "namespace", "nss", "sourceNss", "targetNss", "newNss", "oldNss", "sourceNamespace", "targetNamespace", "destinationNamespace", "affectedNamespaces")
-var databaseKeys = set("database", "db", "dbName", "dbname", "$db")
+var databaseKeys = set("database", "db", "dbName", "dbname", "$db", "authenticationDatabase")
 var collectionKeys = set("collection", "coll", "collName", "find", "aggregate", "insert", "update", "delete", "findAndModify")
 var replsetKeys = set("replSetName", "setName", "replicaSet", "set")
-var userKeys = set("user", "userName", "queryUser")
+var userKeys = set("user", "userName", "queryUser", "principalName")
 var pathKeys = set("dbPath", "path", "filePath", "filepath", "configPath", "logPath", "file", "fileName", "dir", "directory")
 var connStringKeys = set("connString", "connectionString", "uri", "mongoUri", "ldapurl")
 var shardKeys = set("shard", "shardId", "fromShard", "toShard", "donorShardId", "recipientShardId")
 var appNameKeys = set("appName", "clientName")
+
+// X.509 subject and issuer names: replaced whole, they name the organisation,
+// unit, location and host.
+var certSubjectKeys = set("peerSubject", "peerSubjectName", "subjectName", "issuerName", "subject", "issuer", "certificateSubject", "x509Subject")
 var freetextKeys = set("msg", "error", "errmsg", "reason", "message", "info", "errorMessage", "description")
 var hostListKeys = set("addresses", "failedHosts", "nodes", "configServers", "listenAddrs", "hosts", "passives", "arbiters")
 var skipKeys = set("t", "s", "c", "id", "ctx", "svc", "tags", "connectionId", "durationMillis", "millis", "docsExamined", "keysExamined", "numYields", "nreturned", "txnNumber", "opId", "version", "port", "ok", "code", "codeName", "result", "numDocs", "numRecords", "protocol", "planSummary", "queryHash", "planCacheKey", "type")
 var bsonStructuralKeys = set("op", "v", "t", "ts", "wall", "stmtId", "txnNumber", "ui", "lsid", "uid", "_id", "$oid", "$uuid", "$date", "$timestamp", "$binary", "$numberLong", "$numberInt", "$numberDouble", "$regularExpression", "readConcern", "writeConcern", "sort", "projection", "$v", "diff", "u", "i", "d", "$set", "$unset", "$inc", "$push", "$pull", "key", "unique")
 var internalDBs = set("admin", "local", "config")
+
+// LDAP distinguished-name components: dc= values name the organisation's
+// domain, cn=/uid= values name accounts. ou= values are usually generic
+// ("Users", "ServiceAccounts") and are left alone.
+var reLDAPComponent = regexp.MustCompile(`(?i)\b(dc|cn|uid|o)=([^,;)\s"'\\{}*%?]+)`)
+var commonDCs = set("com", "net", "org", "edu", "gov", "mil", "int", "io", "local", "corp", "example", "internal", "lan")
 var knownNonDomains = set("system.version", "system.sessions", "system.profile", "system.views", "$cmd", "startup_log")
 
 func set(values ...string) map[string]struct{} {
@@ -136,6 +147,11 @@ func has(m map[string]struct{}, key string) bool { _, ok := m[key]; return ok }
 func (s *Scanner) discoverLogLine(line []byte) {
 	if len(line) == 0 {
 		return
+	}
+	prefix, doc, structured := logline.Split(line)
+	if structured && len(prefix) > 0 {
+		s.discoverFreetext(string(prefix))
+		line = doc
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(line, &obj); err == nil {
@@ -159,6 +175,9 @@ func (s *Scanner) discoverValue(key string, val any) {
 	}
 	text = strings.TrimSpace(text)
 	switch {
+	case has(certSubjectKeys, key) && strings.Contains(text, "="):
+		s.register("cert_subject", text)
+		s.discoverLDAP(text)
 	case has(replsetKeys, key):
 		s.register("replset", text)
 	case has(shardKeys, key):
@@ -232,7 +251,21 @@ func (s *Scanner) discoverNamespace(ns string) {
 		s.register("collection", parts[1])
 	}
 }
+
+// notHosts are values that host fields hold when there is no host.
+var notHosts = set("unknown", "empty", "none", "null", "nil", "n/a", "localhost", "(none)", "self")
+
 func (s *Scanner) discoverHostValue(val string) {
+	if strings.HasPrefix(val, "/") {
+		// a Unix socket path, not a host
+		if !strings.HasPrefix(val, "/tmp/") && !strings.HasPrefix(val, "/var/run/") && !strings.HasPrefix(val, "/run/") {
+			s.register("path", val)
+		}
+		return
+	}
+	if strings.ContainsAny(val, " \t") || has(notHosts, strings.ToLower(val)) {
+		return
+	}
 	host := val
 	if strings.Contains(val, ":") && !strings.HasPrefix(val, "[") {
 		if idx := strings.LastIndex(val, ":"); idx >= 0 {
@@ -300,9 +333,53 @@ func (s *Scanner) discoverFreetext(text string) {
 	for _, cls := range reJavaClass.FindAllString(text, -1) {
 		s.register("java_class", cls)
 	}
+	s.discoverLDAP(text)
+}
+
+// discoverLDAP registers the organisation (dc=) and account (cn=, uid=)
+// names of LDAP distinguished names and queries in free text.
+func (s *Scanner) discoverLDAP(text string) {
+	if !strings.Contains(text, "=") {
+		return
+	}
+	for _, m := range reLDAPComponent.FindAllStringSubmatch(text, -1) {
+		attr, value := strings.ToLower(m[1]), m[2]
+		if len(value) < 2 {
+			continue
+		}
+		if attr == "dc" || attr == "o" {
+			if !has(commonDCs, strings.ToLower(value)) {
+				s.register("org", value)
+			}
+			continue
+		}
+		s.register("user", value)
+	}
+}
+
+func hasLDAPComponent(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "dc=") || strings.Contains(lower, "cn=") || strings.Contains(lower, "uid=") || strings.Contains(lower, "o=")
+}
+
+// discoverKey registers host:port and path keys, as used by topology
+// descriptions, connection pools and listener socket statistics.
+func (s *Scanner) discoverKey(key string) {
+	switch {
+	case strings.HasPrefix(key, "/"):
+		if !strings.HasPrefix(key, "/tmp/") && !strings.HasPrefix(key, "/var/run/") && !strings.HasPrefix(key, "/run/") {
+			s.register("path", key)
+		}
+	case strings.Contains(key, ":"):
+		i := strings.LastIndex(key, ":")
+		port := key[i+1:]
+		if port != "" && strings.Trim(port, "0123456789") == "" && i > 0 {
+			s.discoverHostValue(key)
+		}
+	}
 }
 func (s *Scanner) discoverFreetextLight(text string) {
-	if reIP.MatchString(text) || reEmail.MatchString(text) || reFQDN.MatchString(text) {
+	if reIP.MatchString(text) || reEmail.MatchString(text) || reFQDN.MatchString(text) || hasLDAPComponent(text) {
 		s.discoverFreetext(text)
 	}
 }
@@ -342,11 +419,17 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 	switch v := obj.(type) {
 	case map[string]any:
 		for key, val := range v {
-			if has(skipKeys, key) {
+			if strings.ContainsAny(key, ":/") {
+				s.discoverKey(key)
+			}
+			if has(skipKeys, key) || redact.DocumentContainer(key) {
 				continue
 			}
 			child := inCommand || redact.CommandContext(key)
 			if redact.PayloadField(key, val, child) {
+				continue
+			}
+			if _, isString := val.(string); isString && child && !redact.CommandSafeString(key) {
 				continue
 			}
 			s.discoverValue(key, val)
@@ -380,7 +463,7 @@ func (s *Scanner) discoverCommandData(obj any, depth int) {
 			s.discoverNamespace(to)
 		}
 		for key, val := range v {
-			if redact.PayloadField(key, val, true) {
+			if redact.PayloadField(key, val, true) || redact.DocumentContainer(key) {
 				continue
 			}
 			switch val.(type) {
@@ -399,7 +482,10 @@ func (s *Scanner) deepDiscoverBSON(doc bson.D, depth int, inCommand bool) {
 		return
 	}
 	for _, elem := range doc {
-		if has(skipKeys, elem.Key) {
+		if strings.ContainsAny(elem.Key, ":/") {
+			s.discoverKey(elem.Key)
+		}
+		if has(skipKeys, elem.Key) || redact.DocumentContainer(elem.Key) {
 			continue
 		}
 		child := inCommand || redact.CommandContext(elem.Key)
@@ -408,6 +494,9 @@ func (s *Scanner) deepDiscoverBSON(doc bson.D, depth int, inCommand bool) {
 		}
 		switch v := elem.Value.(type) {
 		case string:
+			if child && !redact.CommandSafeString(elem.Key) {
+				continue
+			}
 			s.discoverValue(elem.Key, v)
 		case bson.D:
 			s.deepDiscoverBSON(v, depth+1, child)

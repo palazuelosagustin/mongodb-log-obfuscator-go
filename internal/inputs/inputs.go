@@ -65,12 +65,12 @@ func Resolve(args []string, excludeDir string, opts Options) ([]File, string, er
 	files = dedupe(files)
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	inputRoot := "."
-	if len(roots) > 0 {
-		inputRoot = commonPath(roots)
-	} else if len(files) > 0 {
-		paths := make([]string, len(files))
-		for i, f := range files {
-			paths[i] = filepath.Dir(f.Path)
+	if len(roots) > 0 || len(files) > 0 {
+		// Directories given and the directories of files given: the root
+		// must contain every input so outputs stay below the output root.
+		paths := append([]string(nil), roots...)
+		for _, f := range files {
+			paths = append(paths, filepath.Dir(f.Path))
 		}
 		inputRoot = commonPath(paths)
 	} else if cwd, err := os.Getwd(); err == nil {
@@ -110,7 +110,7 @@ func allowed(typ FileType, opts Options) bool {
 func classify(path string) FileType {
 	base := filepath.Base(path)
 	parent := filepath.Base(filepath.Dir(path))
-	if strings.HasPrefix(base, ".") || base == "cluster_mapping.json" || strings.Contains(base, "_obfuscated") || strings.Contains(path, "_obfuscated") {
+	if strings.HasPrefix(base, ".") || base == "cluster_mapping.json" || strings.HasSuffix(base, "_mapping.json") || strings.Contains(base, "_obfuscated") || strings.Contains(path, "_obfuscated") {
 		return ""
 	}
 	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".gz", ".zip", ".bz2", ".xz", ".7z", ".rar"} {
@@ -131,12 +131,18 @@ func classify(path string) FileType {
 }
 
 func OutputPath(inputPath, inputRoot, outputRoot string, typ FileType) string {
+	return filepath.Join(outputRoot, OutputRel(inputPath, inputRoot, typ))
+}
+
+// OutputRel is the output path relative to the output root. It never leaves
+// the output root: a file outside inputRoot keeps only its base name.
+func OutputRel(inputPath, inputRoot string, typ FileType) string {
 	rel, err := filepath.Rel(inputRoot, inputPath)
-	if err != nil {
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		rel = filepath.Base(inputPath)
 	}
 	if typ == FTDC {
-		return filepath.Join(outputRoot, rel)
+		return rel
 	}
 	dir := filepath.Dir(rel)
 	base := filepath.Base(rel)
@@ -145,7 +151,7 @@ func OutputPath(inputPath, inputRoot, outputRoot string, typ FileType) string {
 	} else {
 		base += "_obfuscated"
 	}
-	return filepath.Join(outputRoot, dir, base)
+	return filepath.Join(dir, base)
 }
 
 func dedupe(files []File) []File {

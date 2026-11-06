@@ -17,6 +17,7 @@ import (
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/discover"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
@@ -41,7 +42,22 @@ type Summary struct {
 	PayloadRedactions int
 	DiscoverTime      time.Duration
 	ReplaceTime       time.Duration
+	// Outputs are the written paths, in the order of Config.Files.
+	Outputs []string
 }
+
+// OutputPath is where the obfuscated copy of f is written: its path relative
+// to the input root, below the output root, with mapped names (host names in
+// file and directory names) replaced.
+func OutputPath(f inputs.File, inputRoot, outputRoot string, names *replace.Matcher) string {
+	rel := inputs.OutputRel(f.Path, inputRoot, f.Type)
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i, part := range parts {
+		parts[i] = names.ApplyName(part)
+	}
+	return filepath.Join(outputRoot, filepath.Join(parts...))
+}
+
 type fileResult struct {
 	file   inputs.File
 	result discover.Result
@@ -86,9 +102,15 @@ func Run(cfg Config) (Summary, error) {
 	if err := os.MkdirAll(cfg.OutputRoot, 0o755); err != nil {
 		return summary, err
 	}
-	matcher := replace.New(reps)
+	matcher := newObfuscator(cfg.Registry)
+	names := replace.New(reps)
+	outPaths := make([]string, len(cfg.Files))
+	for i, f := range cfg.Files {
+		outPaths[i] = OutputPath(f, cfg.InputRoot, cfg.OutputRoot, names)
+	}
+	summary.Outputs = outPaths
 	start = time.Now()
-	redactions, err := replaceAll(cfg.Files, cfg.InputRoot, cfg.OutputRoot, cfg.Jobs, matcher)
+	redactions, err := replaceAll(cfg.Files, outPaths, cfg.Jobs, matcher)
 	if err != nil {
 		return summary, err
 	}
@@ -140,7 +162,7 @@ func discoverAll(files []inputs.File, jobs int) ([]fileResult, error) {
 	return results, nil
 }
 
-func replaceAll(files []inputs.File, inputRoot, outputRoot string, jobs int, matcher *replace.Matcher) (int, error) {
+func replaceAll(files []inputs.File, outPaths []string, jobs int, matcher *obfuscator) (int, error) {
 	type job struct {
 		file inputs.File
 		out  string
@@ -172,8 +194,8 @@ func replaceAll(files []inputs.File, inputRoot, outputRoot string, jobs int, mat
 			}
 		}()
 	}
-	for _, f := range files {
-		jobsCh <- job{file: f, out: inputs.OutputPath(f.Path, inputRoot, outputRoot, f.Type)}
+	for i, f := range files {
+		jobsCh <- job{file: f, out: outPaths[i]}
 	}
 	close(jobsCh)
 	wg.Wait()
@@ -188,7 +210,7 @@ func replaceAll(files []inputs.File, inputRoot, outputRoot string, jobs int, mat
 	return total, nil
 }
 
-func replaceLog(inPath, outPath string, matcher *replace.Matcher) (int, error) {
+func replaceLog(inPath, outPath string, matcher *obfuscator) (int, error) {
 	in, err := os.Open(inPath)
 	if err != nil {
 		return 0, err
@@ -206,7 +228,7 @@ func replaceLog(inPath, outPath string, matcher *replace.Matcher) (int, error) {
 	for {
 		line, err := r.ReadString('\n')
 		if line != "" {
-			repl, n, e := replaceLogLine(line, matcher)
+			repl, n, e := matcher.logLine(line)
 			if e != nil {
 				return total, e
 			}
@@ -224,7 +246,7 @@ func replaceLog(inPath, outPath string, matcher *replace.Matcher) (int, error) {
 	}
 }
 
-func replaceFTDC(inPath, outPath string, matcher *replace.Matcher) (int, error) {
+func replaceFTDC(inPath, outPath string, matcher *obfuscator) (int, error) {
 	data, err := os.ReadFile(inPath)
 	if err != nil {
 		return 0, err
@@ -253,7 +275,7 @@ func replaceFTDC(inPath, outPath string, matcher *replace.Matcher) (int, error) 
 		switch t {
 		case ftdc.TypeMetadata, ftdc.TypePeriodicMetadata:
 			if inner, ok := ftdc.DocField(doc, "doc"); ok {
-				ob, n := obfuscateBSON(inner, matcher, false)
+				ob, n := matcher.bsonDoc(inner, false)
 				total += n
 				doc = ftdc.ReplaceField(doc, "doc", ob)
 			}
@@ -263,7 +285,7 @@ func replaceFTDC(inPath, outPath string, matcher *replace.Matcher) (int, error) 
 				if err == nil {
 					var ref bson.D
 					if err := bson.Unmarshal(chunk.RefBSON, &ref); err == nil {
-						ob, n := obfuscateBSON(ref, matcher, false)
+						ob, n := matcher.bsonDoc(ref, false)
 						total += n
 						chunk.RefBSON, err = bson.Marshal(ob)
 						if err != nil {
@@ -289,7 +311,37 @@ func replaceFTDC(inPath, outPath string, matcher *replace.Matcher) (int, error) 
 	return total, nil
 }
 
+// obfuscator applies the shared mapping: values to string values, keys to
+// JSON/BSON keys (hosts, IPs and paths only), names to output file names.
+type obfuscator struct {
+	values *replace.Matcher
+	keys   *replace.Matcher
+}
+
+func newObfuscator(reg *registry.Registry) *obfuscator {
+	return &obfuscator{
+		values: replace.New(reg.Replacements()),
+		keys:   replace.New(reg.ReplacementsFor(registry.NetworkAndPathCategories...)),
+	}
+}
+
+// text maps and scrubs free text: string values, log prefixes.
+func (o *obfuscator) text(s string) (string, int) {
+	return redact.ScrubText(o.values.Apply(s))
+}
+
+func (o *obfuscator) key(k string) string {
+	if !strings.ContainsAny(k, ":/") {
+		return k
+	}
+	return o.keys.Apply(k)
+}
+
 func replaceLogLine(line string, matcher *replace.Matcher) (string, int, error) {
+	return (&obfuscator{values: matcher, keys: matcher}).logLine(line)
+}
+
+func (o *obfuscator) logLine(line string) (string, int, error) {
 	newline := ""
 	raw := line
 	if strings.HasSuffix(raw, "\n") {
@@ -300,18 +352,20 @@ func replaceLogLine(line string, matcher *replace.Matcher) (string, int, error) 
 		newline = "\r" + newline
 		raw = strings.TrimSuffix(raw, "\r")
 	}
-	obj, err := parseOrderedJSON([]byte(raw))
-	if err != nil {
-		repl := matcher.Apply(line)
-		redacted, n := redact.DirectText(repl)
-		return redacted, n, nil
+	prefix, doc, structured := logline.Split([]byte(raw))
+	obj, err := parseOrderedJSON(doc)
+	if err != nil || (!structured && len(prefix) > 0) {
+		repl, n := o.text(line)
+		redacted, m := redact.DirectText(repl)
+		return redacted, n + m, nil
 	}
-	transformed, n := obfuscateJSON(obj, matcher, false)
+	transformed, n := o.json(obj, "", false)
 	enc, err := json.Marshal(transformed)
 	if err != nil {
 		return "", n, err
 	}
-	return string(enc) + newline, n, nil
+	head, m := o.text(string(prefix))
+	return head + string(enc) + newline, n + m, nil
 }
 
 type jsonObject []jsonMember
@@ -415,21 +469,24 @@ func (obj jsonObject) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
+// json obfuscates a parsed log document. key is the key the value is stored
+// under (the parent key for array items); inCommand is set below command
+// objects, where only allowlisted strings are kept.
+func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 	switch x := v.(type) {
 	case jsonObject:
 		out := make(jsonObject, len(x))
 		total := 0
 		for i, member := range x {
-			out[i].key = member.key
+			out[i].key = o.key(member.key)
 			child := inCommand || redact.CommandContext(member.key)
-			if redact.PayloadField(member.key, member.value, child) {
+			if redact.DocumentContainer(member.key) || redact.PayloadField(member.key, member.value, child) {
 				repl, n := redactJSONValue(member.value)
 				out[i].value = repl
 				total += n
 				continue
 			}
-			repl, n := obfuscateJSON(member.value, matcher, child)
+			repl, n := o.json(member.value, member.key, child)
 			out[i].value = repl
 			total += n
 		}
@@ -438,13 +495,16 @@ func obfuscateJSON(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
 		out := make([]any, len(x))
 		total := 0
 		for i, item := range x {
-			repl, n := obfuscateJSON(item, matcher, inCommand)
+			repl, n := o.json(item, key, inCommand)
 			out[i] = repl
 			total += n
 		}
 		return out, total
 	case string:
-		return matcher.Apply(x), 0
+		if inCommand && !redact.CommandSafeString(key) {
+			return redact.StringPlaceholder, countStringChange(x, redact.StringPlaceholder)
+		}
+		return o.text(x)
 	default:
 		return v, 0
 	}
@@ -515,35 +575,42 @@ func countStringChange(before, after string) int {
 }
 
 func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D, int) {
+	return (&obfuscator{values: matcher, keys: matcher}).bsonDoc(doc, inCommand)
+}
+
+func (o *obfuscator) bsonDoc(doc bson.D, inCommand bool) (bson.D, int) {
 	out := make(bson.D, len(doc))
 	total := 0
 	for i, elem := range doc {
-		out[i].Key = elem.Key
+		out[i].Key = o.key(elem.Key)
 		child := inCommand || redact.CommandContext(elem.Key)
-		if redact.PayloadField(elem.Key, elem.Value, child) {
+		if redact.DocumentContainer(elem.Key) || redact.PayloadField(elem.Key, elem.Value, child) {
 			repl, n := redactBSONPayload(elem.Value, "")
 			out[i].Value = repl
 			total += n
 			continue
 		}
-		repl, n := obfuscateValue(elem.Value, matcher, child)
+		repl, n := o.bsonValue(elem.Value, elem.Key, child)
 		out[i].Value = repl
 		total += n
 	}
 	return out, total
 }
 
-func obfuscateValue(v any, matcher *replace.Matcher, inCommand bool) (any, int) {
+func (o *obfuscator) bsonValue(v any, key string, inCommand bool) (any, int) {
 	switch x := v.(type) {
 	case string:
-		return matcher.Apply(x), 0
+		if inCommand && !redact.CommandSafeString(key) {
+			return redact.StringPlaceholder, countStringChange(x, redact.StringPlaceholder)
+		}
+		return o.text(x)
 	case bson.D:
-		return obfuscateBSON(x, matcher, inCommand)
+		return o.bsonDoc(x, inCommand)
 	case bson.A:
 		out := make(bson.A, len(x))
 		total := 0
 		for i, item := range x {
-			repl, n := obfuscateValue(item, matcher, inCommand)
+			repl, n := o.bsonValue(item, key, inCommand)
 			out[i] = repl
 			total += n
 		}

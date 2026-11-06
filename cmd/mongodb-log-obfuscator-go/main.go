@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -13,9 +14,18 @@ import (
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/processor"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/verify"
 )
 
+// exitLeaks is the exit status when --verify or verify finds possible leaks.
+const exitLeaks = 3
+
+var errLeaks = errors.New("verify found possible leaks")
+
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		os.Exit(runVerifyCommand(os.Args[2:]))
+	}
 	args, ok := obfuscateArgs(os.Args[1:])
 	if !ok {
 		os.Exit(2)
@@ -24,9 +34,77 @@ func main() {
 		return
 	}
 	if err := obfuscate(args); err != nil {
+		if errors.Is(err, errLeaks) {
+			fmt.Fprintf(os.Stderr, "Error: %v; do not share the output until they are checked\n", err)
+			os.Exit(exitLeaks)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func runVerifyCommand(args []string) int {
+	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
+	var mapping, mappingAlias string
+	fs.StringVar(&mapping, "mapping", "", "mapping JSON written by the obfuscation")
+	fs.StringVar(&mappingAlias, "m", "", "alias for --mapping")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if mapping == "" {
+		mapping = mappingAlias
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR")
+		return 2
+	}
+	dir := fs.Arg(0)
+	if mapping == "" {
+		if abs, err := filepath.Abs(dir); err == nil {
+			mapping = defaultMappingPath(abs)
+		}
+	}
+	reg := registry.New()
+	if _, err := os.Stat(mapping); err == nil {
+		if err := reg.Load(mapping); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			return 1
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: no mapping at %s; checking only emails, public IPs, card numbers and LDAP names\n", mapping)
+		mapping = ""
+	}
+	if err := runVerify(dir, mapping, reg); err != nil {
+		if errors.Is(err, errLeaks) {
+			return exitLeaks
+		}
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runVerify(dir, mappingPath string, reg *registry.Registry) error {
+	report, err := verify.Dir(dir, verify.Options{Mapping: reg.Report(), MappingPath: mappingPath})
+	if err != nil {
+		return err
+	}
+	report.Write(os.Stderr)
+	if report.Total > 0 {
+		return fmt.Errorf("%w (%d)", errLeaks, report.Total)
+	}
+	return nil
+}
+
+// defaultMappingPath keeps the mapping next to the output directory, never
+// inside it: whoever receives the output must not receive the mapping.
+func defaultMappingPath(outputRoot string) string {
+	return filepath.Clean(outputRoot) + "_mapping.json"
+}
+
+func inside(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func obfuscateArgs(args []string) ([]string, bool) {
@@ -56,7 +134,7 @@ func obfuscate(args []string) error {
 	fs := flag.NewFlagSet("obfuscate", flag.ExitOnError)
 	var out, outAlias, mapping, mappingAlias, loadMapping, profile string
 	var jobs int
-	var dryRun, logOnly, ftdcOnly bool
+	var dryRun, logOnly, ftdcOnly, doVerify bool
 	fs.StringVar(&out, "out", "", "root directory for obfuscated output")
 	fs.StringVar(&outAlias, "o", "", "alias for --out")
 	fs.StringVar(&outAlias, "output-dir", "", "alias for --out")
@@ -68,6 +146,7 @@ func obfuscate(args []string) error {
 	fs.BoolVar(&dryRun, "dry-run", false, "discover and summarize without writing output")
 	fs.BoolVar(&logOnly, "log-only", false, "process only log files")
 	fs.BoolVar(&ftdcOnly, "ftdc-only", false, "process only FTDC files")
+	fs.BoolVar(&doVerify, "verify", false, "check the output for possible leaks after writing it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -108,9 +187,15 @@ func obfuscate(args []string) error {
 		return err
 	}
 	if mapping == "" {
-		mapping = filepath.Join(outputRoot, "cluster_mapping.json")
+		mapping = defaultMappingPath(outputRoot)
 	} else if mapping, err = filepath.Abs(mapping); err != nil {
 		return err
+	}
+	if inside(mapping, outputRoot) {
+		return fmt.Errorf("--mapping %s is inside the output directory %s; the mapping reverses the obfuscation and must be kept apart from the files you share", mapping, outputRoot)
+	}
+	if _, err := os.Stat(filepath.Join(outputRoot, "cluster_mapping.json")); err == nil {
+		fmt.Fprintf(os.Stderr, "Warning: %s holds a mapping from an older version; delete it before sharing the directory\n", filepath.Join(outputRoot, "cluster_mapping.json"))
 	}
 	reg := registry.New()
 	if loadMapping != "" {
@@ -122,9 +207,6 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Input root:   %s\n", inputRoot)
 	fmt.Fprintf(os.Stderr, "Output root:  %s\n", outputRoot)
 	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
-	if len(files) == 1 {
-		fmt.Fprintf(os.Stderr, "Obfuscated file: %s\n", inputs.OutputPath(files[0].Path, inputRoot, outputRoot, files[0].Type))
-	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Found %d file(s)\n", len(files))
 	start := time.Now()
@@ -139,8 +221,15 @@ func obfuscate(args []string) error {
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Wrote %d file(s) in %s\n", summary.Files, summary.ReplaceTime.Round(time.Millisecond))
+	if len(summary.Outputs) == 1 {
+		fmt.Fprintf(os.Stderr, "Obfuscated file: %s\n", summary.Outputs[0])
+	}
 	fmt.Fprintf(os.Stderr, "Payload fields redacted: %d\n", summary.PayloadRedactions)
 	fmt.Fprintf(os.Stderr, "Done in %s.\n", time.Since(start).Round(time.Millisecond))
+	if doVerify {
+		fmt.Fprintln(os.Stderr)
+		return runVerify(outputRoot, mapping, reg)
+	}
 	return nil
 }
 func initialOutputRoot(firstInput, out string) (string, error) {
@@ -204,5 +293,12 @@ Flags:
   --dry-run                     Discover only; do not write output
   --log-only                    Process only log files
   --ftdc-only                   Process only FTDC files
+  --verify                      Check the output for possible leaks (exit 3 if any)
+
+  mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR
+                                Check an obfuscated directory; exit 3 on possible leaks
+
+The mapping defaults to OUTPUT_DIR_mapping.json, next to the output directory
+and never inside it: it reverses the obfuscation.
 `)
 }

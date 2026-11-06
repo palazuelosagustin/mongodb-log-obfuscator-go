@@ -170,8 +170,8 @@ func TestRunRedactsJSONCommandPayloadsWithoutMapping(t *testing.T) {
 }
 
 func TestObfuscatedSlowQueryWorksWithMongoDBLogstatQueryReport(t *testing.T) {
-	logstatPath := "/home/agustin.palazuelos/bin/mongodb-logstat/mongodb-logstat"
-	if _, err := os.Stat(logstatPath); err != nil {
+	logstatPath, err := exec.LookPath("mongodb-logstat")
+	if err != nil {
 		t.Skipf("mongodb-logstat not available: %v", err)
 	}
 	root := t.TempDir()
