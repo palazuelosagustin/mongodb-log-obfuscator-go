@@ -1,4 +1,4 @@
-module github.com/agustinp/mongodb-log-obfuscator-go
+module github.com/palazuelosagustin/mongodb-log-obfuscator-go
 
 go 1.22
 

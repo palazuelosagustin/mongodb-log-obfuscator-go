@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/discover"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/discover"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/replace"
 )
 
 // obfuscateLines runs discovery and replacement over lines, as Run does.

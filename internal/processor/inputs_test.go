@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )

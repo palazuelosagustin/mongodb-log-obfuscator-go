@@ -13,11 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/processor"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/verify"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/processor"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/verify"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/version"
 )
 
 // exitLeaks is the exit status when --verify or verify finds possible leaks.
@@ -26,6 +27,10 @@ const exitLeaks = 3
 var errLeaks = errors.New("verify found possible leaks")
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {
+		fmt.Println(version.Long("mongodb-log-obfuscator-go"))
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "verify" {
 		os.Exit(runVerifyCommand(os.Args[2:]))
 	}
@@ -224,6 +229,8 @@ func obfuscate(args []string) error {
 		}
 		redact.SetEqualityKey(key)
 	}
+	reg.ToolVersion = version.String()
+	fmt.Fprintf(os.Stderr, "%s\n", version.Long("mongodb-log-obfuscator-go"))
 	fmt.Fprintf(os.Stderr, "Input root:   %s\n", inputRoot)
 	fmt.Fprintf(os.Stderr, "Output root:  %s\n", outputRoot)
 	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
@@ -332,8 +339,12 @@ func startProfile(dir string) (func(), error) {
 	}, nil
 }
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
+	fmt.Fprint(os.Stderr, usageText)
+}
+
+const usageText = `Usage:
   mongodb-log-obfuscator-go [obfuscate] [flags] INPUT...
+  mongodb-log-obfuscator-go --version
 
 Flags:
   --out, -o, --output-dir DIR   Root directory for obfuscated output
@@ -353,5 +364,4 @@ Flags:
 
 The mapping defaults to OUTPUT_DIR_mapping.json, next to the output directory
 and never inside it: it reverses the obfuscation.
-`)
-}
+`

@@ -3,7 +3,7 @@ package replace
 import (
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
 )
 
 // A replacement must never be replaced again: real 10.x addresses and the

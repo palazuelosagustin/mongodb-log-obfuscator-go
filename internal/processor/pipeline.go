@@ -3,7 +3,7 @@ package processor
 import (
 	"regexp"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
 )
 
 // Aggregation pipelines mix application values with structure needed for

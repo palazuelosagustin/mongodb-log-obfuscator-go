@@ -1,22 +1,88 @@
 # mongodb-log-obfuscator-go
 
-Fast Go CLI for obfuscating MongoDB logs and FTDC diagnostic files with one
-shared mapping across all inputs.
+Obfuscates MongoDB logs and FTDC diagnostic data before they are shared, for
+example with an AI agent: host names, IP addresses, database, collection and
+user names, and the personal data inside query payloads are replaced, while
+what is needed to troubleshoot stays: query shapes and plans, latencies,
+topology, replica-set states, metrics. One mapping is shared by all inputs, so
+a host or collection has the same replacement in every log and FTDC file, and
+`mongodb-logstat` and `mongodb-ftdcstat` read the output like the original.
+
+## Install
+
+Download the binary for your platform from the
+[latest release](https://github.com/palazuelosagustin/mongodb-log-obfuscator-go/releases/latest)
+(macOS and Linux, amd64 and arm64):
+
+```bash
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/palazuelosagustin/mongodb-log-obfuscator-go/releases/latest/download/mongodb-log-obfuscator-go_${OS}_${ARCH}.tar.gz" | tar -xz mongodb-log-obfuscator-go
+./mongodb-log-obfuscator-go --version
+```
+
+Move the binary to a directory on your `PATH`. A file downloaded with a
+browser on macOS is quarantined; clear it with
+`xattr -d com.apple.quarantine mongodb-log-obfuscator-go`. Each release lists
+`checksums.txt` (SHA-256) for the archives. To build from source (Go 1.22+):
+`go build -o mongodb-log-obfuscator-go ./cmd/mongodb-log-obfuscator-go`; a
+source build reports `dev (<commit>)` as its version.
+
+## Quick start
+
+```bash
+# obfuscate a case directory and check the result; exit status 3 means
+# possible leaks: do not share the output until they are checked
+mongodb-log-obfuscator-go --verify --out ~/cases/CS0012345/obfuscated ~/cases/CS0012345/raw
+
+# share ~/cases/CS0012345/obfuscated; keep ~/cases/CS0012345/obfuscated_mapping.json
+```
+
+## What is guaranteed
+
+- Values the tool discovers (hosts, IPs, databases, collections, users,
+  replica sets, shards, paths, emails, application names, LDAP/X.509 names) are
+  replaced everywhere, in values, host/path keys and file names, with the same
+  replacement in every file.
+- Inside commands, every string is replaced unless its key is on an
+  allowlist of diagnostic values; filter, update, document and pipeline
+  values are replaced; user documents are replaced wherever they are logged
+  (replicated operations, duplicate-key errors, change streams).
+- The mapping is never written inside the output directory, and `verify`
+  reports one that is.
+- Files that cannot be read or decoded are not copied: a failed file is not
+  written, an undecodable FTDC document is dropped.
+
+Best effort, and what `verify` cannot prove:
+
+- Personal data in free text that is neither a discovered name nor a pattern
+  `verify` checks (emails, public IPv4, card numbers, LDAP names): a person's
+  name or phone number written into an error message by an application, for
+  example. Such text is rare in MongoDB logs, but `verify` passing is evidence,
+  not proof.
+- Field names are kept (they carry the query shape), so a field such as
+  `customerSsn` or one named after the company stays readable.
+- Numbers outside filters and documents (pipeline stages other than `$match`,
+  `$limit`, metrics) are kept.
+- Lines that are not JSON get the mapping and the text patterns (payload
+  keys, card numbers, duplicate-key values), not the structure-aware rules.
 
 ## Usage
 
 ```bash
-go run ./cmd/mongodb-log-obfuscator-go /path/to/support-bundle
-go run ./cmd/mongodb-log-obfuscator-go --out /tmp/sanitized --mapping /tmp/mapping.json /path/to/node1.log /path/to/diagnostic.data
+mongodb-log-obfuscator-go /path/to/support-bundle
+mongodb-log-obfuscator-go --out /tmp/sanitized --mapping /tmp/mapping.json /path/to/node1.log /path/to/diagnostic.data
 
 # explicit subcommand form also works
-go run ./cmd/mongodb-log-obfuscator-go obfuscate /path/to/support-bundle
+mongodb-log-obfuscator-go obfuscate /path/to/support-bundle
 
 # obfuscate, then check the output before sharing it (exit status 3 on possible leaks)
-go run ./cmd/mongodb-log-obfuscator-go --verify /path/to/support-bundle
+mongodb-log-obfuscator-go --verify /path/to/support-bundle
 
 # check an obfuscated directory later
-go run ./cmd/mongodb-log-obfuscator-go verify --mapping /path/to/obfuscated_mapping.json /path/to/obfuscated
+mongodb-log-obfuscator-go verify --mapping /path/to/obfuscated_mapping.json /path/to/obfuscated
+
+mongodb-log-obfuscator-go --version
 ```
 
 Useful flags:
@@ -166,11 +232,42 @@ truncated command data. These redactions are counted in the run summary but are
 not written to `cluster_mapping.json`. Non-JSON log fallback redaction remains
 best-effort text redaction and does not guarantee query-pattern preservation.
 
+## Versions and releases
+
+Releases follow [semantic versioning](https://semver.org/). Until `v1.0.0`, a
+minor release (`v0.2.0`) changes what is obfuscated or kept, or adds flags,
+and a patch release (`v0.1.1`) only fixes bugs. A leak fix is always released
+promptly. `--version` prints the version, commit and build date; the mapping
+records the version that wrote it (`_meta.toolVersion`). Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
+
+To release: move the `Unreleased` entries in `CHANGELOG.md` under the new
+version, commit, then tag and push the tag:
+
+```bash
+git tag -a v0.2.0 -m v0.2.0
+git push origin v0.2.0
+```
+
+The `release` GitHub Actions workflow runs the tests and publishes the
+archives with [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`). Check
+the config locally with `goreleaser release --snapshot --clean`.
+
+## Agent skill
+
+`skills/.claude/mongodb-log-obfuscator/` is a Claude Code skill that tells an
+agent to obfuscate and verify customer logs before reading them, and how to
+use the output with `mongodb-logstat` and `mongodb-ftdcstat`. Install it with:
+
+```bash
+ln -s ~/bin/mongodb-log-obfuscator-go/skills/.claude/mongodb-log-obfuscator ~/.claude/skills/mongodb-log-obfuscator
+```
+
 ## Development
 
 ```bash
 go test ./...
 go test -bench . ./...
 go vet ./...
-go build ./cmd/mongodb-log-obfuscator-go
+go build -o mongodb-log-obfuscator-go ./cmd/mongodb-log-obfuscator-go
 ```

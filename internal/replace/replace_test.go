@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
 )
 
 func TestApplyLongestFirstReplacementTable(t *testing.T) {

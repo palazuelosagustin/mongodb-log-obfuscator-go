@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/verify"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/verify"
 )
 
 // Lines modelled on leaks found in case logs; every sensitive value starts

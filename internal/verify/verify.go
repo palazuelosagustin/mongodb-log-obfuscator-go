@@ -21,13 +21,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ahocorasick"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ahocorasick"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/pipeline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/replace"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
