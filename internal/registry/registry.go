@@ -119,8 +119,19 @@ func template(category string, n int) string {
 }
 
 func (r *Registry) Replacements() []Replacement {
+	return r.ReplacementsFor(categories...)
+}
+
+// NetworkAndPathCategories are the categories replaced inside JSON/BSON keys:
+// hosts, IPs and paths appear as keys (topology descriptions, connection
+// pools, socket paths), field names otherwise stay as they are.
+var NetworkAndPathCategories = []string{"hostname", "fqdn", "domain", "ip", "path", "email"}
+
+// ReplacementsFor returns the replacements of the given categories, longest
+// original first.
+func (r *Registry) ReplacementsFor(cats ...string) []Replacement {
 	var out []Replacement
-	for _, cat := range categories {
+	for _, cat := range cats {
 		for original, replacement := range r.Categories[cat] {
 			out = append(out, Replacement{Original: original, Value: replacement})
 		}
@@ -150,7 +161,11 @@ func (r *Registry) Write(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// The mapping reverses the obfuscation: only the owner may read it.
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 func (r *Registry) Load(path string) error {
