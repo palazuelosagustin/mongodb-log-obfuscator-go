@@ -8,6 +8,7 @@ package verify
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,18 +164,14 @@ func Dir(dir string, opts Options) (Report, error) {
 }
 
 func isFTDC(path string) bool {
-	base := filepath.Base(path)
-	if filepath.Base(filepath.Dir(path)) == "diagnostic.data" || strings.HasPrefix(base, "metrics.") || strings.HasSuffix(base, ".ftdc") {
-		return true
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	head := make([]byte, 256)
-	n, _ := f.Read(head)
-	return bytes.IndexByte(head[:n], 0) >= 0
+	head := make([]byte, 16)
+	n, _ := io.ReadFull(f, head)
+	return ftdc.Sniff(head[:n])
 }
 
 func (c *checker) textFile(path, rel string) error {
@@ -183,7 +180,17 @@ func (c *checker) textFile(path, rel string) error {
 		return err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1<<20)
+	br := bufio.NewReaderSize(f, 1<<20)
+	var src io.Reader = br
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, err := gzip.NewReader(br)
+		if err != nil {
+			return err
+		}
+		defer zr.Close()
+		src = zr
+	}
+	r := bufio.NewReaderSize(src, 1<<20)
 	lineNo := 0
 	for {
 		line, err := r.ReadBytes('\n')
@@ -238,15 +245,21 @@ func (c *checker) walkJSON(v any, path []string, rel string, lineNo int) {
 }
 
 func (c *checker) ftdcFile(path, rel string) error {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	docs, err := ftdc.Iterate(data)
-	if err != nil {
-		c.report.Warnings = append(c.report.Warnings, fmt.Sprintf("%s: %v", rel, err))
-	}
-	for _, raw := range docs {
+	defer f.Close()
+	rd := ftdc.NewReader(bufio.NewReaderSize(f, 1<<20))
+	for {
+		raw, err := rd.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			c.report.Warnings = append(c.report.Warnings, fmt.Sprintf("%s: %v", rel, err))
+			return nil
+		}
 		t, ok := ftdc.Type(raw.Doc)
 		if !ok {
 			continue
@@ -273,7 +286,6 @@ func (c *checker) ftdcFile(path, rel string) error {
 			c.walkBSON(ref, nil, rel)
 		}
 	}
-	return nil
 }
 
 func (c *checker) walkBSON(v any, path []string, rel string) {

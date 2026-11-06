@@ -178,11 +178,12 @@ func obfuscate(args []string) error {
 	if err != nil {
 		return err
 	}
-	files, inputRoot, err := inputs.Resolve(inputArgs, outputRoot, inputs.Options{LogOnly: logOnly, FTDCOnly: ftdcOnly})
+	files, skipped, inputRoot, err := inputs.Resolve(inputArgs, outputRoot, inputs.Options{LogOnly: logOnly, FTDCOnly: ftdcOnly})
 	if err != nil {
 		return err
 	}
 	if len(files) == 0 {
+		printMessages("Skipped", skippedMessages(skipped), inputRoot)
 		return fmt.Errorf("no log or FTDC files found")
 	}
 	if out == "" {
@@ -227,11 +228,14 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Found %d file(s)\n", len(files))
+	printMessages("Skipped", skippedMessages(skipped), inputRoot)
 	start := time.Now()
 	summary, err := processor.Run(processor.Config{Files: files, InputRoot: inputRoot, OutputRoot: outputRoot, MappingPath: mapping, Jobs: jobs, DryRun: dryRun, Registry: reg})
 	if err != nil {
 		return err
 	}
+	printMessages("Warning for", summary.Warnings, inputRoot)
+	printMessages("Failed (not written)", summary.Failures, inputRoot)
 	fmt.Fprintf(os.Stderr, "Discovered %d replacements in %s\n", summary.Replacements, summary.DiscoverTime.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "Payload redaction: enabled\n")
 	if dryRun {
@@ -246,9 +250,37 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Done in %s.\n", time.Since(start).Round(time.Millisecond))
 	if doVerify {
 		fmt.Fprintln(os.Stderr)
-		return runVerify(outputRoot, mapping, reg)
+		if err := runVerify(outputRoot, mapping, reg); err != nil {
+			return err
+		}
+	}
+	if len(summary.Failures) > 0 {
+		return fmt.Errorf("%d file(s) could not be obfuscated and were not written (listed above)", len(summary.Failures))
 	}
 	return nil
+}
+
+func skippedMessages(skipped []inputs.Skipped) []processor.FileMessage {
+	out := make([]processor.FileMessage, len(skipped))
+	for i, s := range skipped {
+		out[i] = processor.FileMessage{Path: s.Path, Message: s.Reason}
+	}
+	return out
+}
+
+// printMessages lists files with a message, paths relative to the input root.
+func printMessages(title string, msgs []processor.FileMessage, root string) {
+	if len(msgs) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s %d file(s):\n", title, len(msgs))
+	for _, m := range msgs {
+		path := m.Path
+		if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", path, m.Message)
+	}
 }
 func initialOutputRoot(firstInput, out string) (string, error) {
 	if out != "" {

@@ -36,6 +36,26 @@ Useful flags:
   checked against guessed values. Use `--load-mapping` to hash later inputs the
   same way.
 
+## Inputs
+
+Files are recognised by content, not by name:
+
+- FTDC: a BSON document starting with `_id`, wherever it is (`diagnostic.data`,
+  renamed copies). A file that ends inside a document (the `metrics.interim`
+  of a running mongod) keeps its complete documents, with a warning. FTDC
+  documents that cannot be decoded are dropped with a warning, never copied.
+- gzip-compressed logs (`mongod.log.1.gz`, `mongod.log-20261104.gz`): read
+  compressed and written compressed (`mongod.log.1_obfuscated.gz`).
+- any other text file (logs, `mongod.conf`, command output): obfuscated as
+  text, JSON log lines as JSON.
+
+Skipped and listed with the reason: archives (`.tar.gz`, `.zip`, ... - extract
+them first), binary files that are not FTDC, gzip files that do not hold
+text, empty files. Hidden files, earlier outputs and mapping files are
+ignored. A file that cannot be read is listed as failed and not written; the
+other files are written and the exit status is 1. FTDC files are streamed
+one document at a time, so memory does not grow with their size.
+
 Log files are written as `*_obfuscated.log`. FTDC files keep their relative
 paths under the output root. Mapped names in file and directory names are
 replaced too (`db01.corp.com_mongod.log` becomes

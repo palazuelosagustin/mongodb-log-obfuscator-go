@@ -3,6 +3,7 @@ package discover
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,14 +30,23 @@ type Scanner struct {
 	warnings []string
 }
 
-func LogFile(path string) (Result, error) {
+func LogFile(path string, gz bool) (Result, error) {
 	s := &Scanner{c: registry.NewCollector()}
 	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1024*1024)
+	var src io.Reader = f
+	if gz {
+		zr, err := gzip.NewReader(bufio.NewReaderSize(f, 1<<20))
+		if err != nil {
+			return Result{}, err
+		}
+		defer zr.Close()
+		src = zr
+	}
+	r := bufio.NewReaderSize(src, 1024*1024)
 	count := 0
 	for {
 		line, err := r.ReadBytes('\n')
@@ -56,15 +66,26 @@ func LogFile(path string) (Result, error) {
 
 func FTDCFile(path string) (Result, error) {
 	s := &Scanner{c: registry.NewCollector()}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, err
 	}
-	docs, err := ftdc.Iterate(data)
-	if err != nil {
-		s.warn(err.Error())
-	}
-	for _, raw := range docs {
+	defer f.Close()
+	rd := ftdc.NewReader(bufio.NewReaderSize(f, 1<<20))
+	count := 0
+	for {
+		raw, err := rd.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if errors.Is(err, ftdc.ErrTruncated) {
+				s.warn(err.Error())
+				break
+			}
+			return Result{}, err
+		}
+		count++
 		t, ok := ftdc.Type(raw.Doc)
 		if !ok {
 			continue
@@ -92,7 +113,7 @@ func FTDCFile(path string) (Result, error) {
 			s.deepDiscoverBSON(ref, 0, false)
 		}
 	}
-	return Result{Collector: s.c, Count: len(docs), Warnings: s.warnings}, nil
+	return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
 }
 
 func (s *Scanner) warn(msg string)                 { s.warnings = append(s.warnings, msg) }

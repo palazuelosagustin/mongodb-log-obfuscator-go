@@ -1,6 +1,8 @@
 package inputs
 
 import (
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,8 +14,8 @@ func TestResolveSkipsObfuscatedAndComputesOutput(t *testing.T) {
 	mustWrite(t, filepath.Join(root, "mongod.log"), "x")
 	mustWrite(t, filepath.Join(root, "mongod_obfuscated.log"), "x")
 	mustWrite(t, filepath.Join(root, "obfuscated", "skip.log"), "x")
-	mustWrite(t, filepath.Join(root, "diagnostic.data", "metrics.1"), string([]byte{5, 0, 0, 0, 0}))
-	files, inputRoot, err := Resolve([]string{root}, filepath.Join(root, "obfuscated"), Options{})
+	mustWrite(t, filepath.Join(root, "diagnostic.data", "metrics.1"), ftdcDoc)
+	files, _, inputRoot, err := Resolve([]string{root}, filepath.Join(root, "obfuscated"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +50,8 @@ func TestResolveFileAndDirectoryStayBelowOutputRoot(t *testing.T) {
 	logPath := filepath.Join(root, "case", "mongod.log")
 	ftdcPath := filepath.Join(root, "case", "diag", "diagnostic.data", "metrics.1")
 	mustWrite(t, logPath, "{}\n")
-	mustWrite(t, ftdcPath, "\x00")
-	files, inputRoot, err := Resolve([]string{logPath, filepath.Dir(filepath.Dir(ftdcPath))}, filepath.Join(root, "out"), Options{})
+	mustWrite(t, ftdcPath, ftdcDoc)
+	files, _, inputRoot, err := Resolve([]string{logPath, filepath.Dir(filepath.Dir(ftdcPath))}, filepath.Join(root, "out"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,5 +65,67 @@ func TestResolveFileAndDirectoryStayBelowOutputRoot(t *testing.T) {
 	}
 	if got := OutputRel("/elsewhere/x.log", inputRoot, Log); got != "x_obfuscated.log" {
 		t.Fatalf("outside file maps to %q", got)
+	}
+}
+
+// ftdcDoc is the smallest FTDC-like document: {_id: Date(0)}.
+var ftdcDoc = string([]byte{18, 0, 0, 0, 0x09, '_', 'i', 'd', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0})
+
+func TestResolveReportsSkippedFiles(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "mongod.log"), "{}\n")
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	zw.Write([]byte("{}\n"))
+	zw.Close()
+	mustWrite(t, filepath.Join(root, "mongod.log.1.gz"), gz.String())
+	mustWrite(t, filepath.Join(root, "logs.tar.gz"), gz.String())
+	mustWrite(t, filepath.Join(root, "core.bin"), "\x7fELF\x00\x01")
+	random := make([]byte, 512)
+	for i := range random {
+		random[i] = byte(1 + (i*97+13)%255) // no NUL byte, not text
+	}
+	mustWrite(t, filepath.Join(root, "noise.dat"), string(random))
+	mustWrite(t, filepath.Join(root, "empty.log"), "")
+	mustWrite(t, filepath.Join(root, "metrics.2026"), ftdcDoc) // FTDC outside diagnostic.data
+	mustWrite(t, filepath.Join(root, "mongod.conf"), "net:\n  bindIp: db1.corp.com\n")
+	mustWrite(t, filepath.Join(root, ".DS_Store"), "\x00")
+	files, skipped, _, err := Resolve([]string{root}, filepath.Join(root, "out"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, f := range files {
+		got[filepath.Base(f.Path)] = string(f.Type)
+		if f.Gzip {
+			got[filepath.Base(f.Path)] += "+gzip"
+		}
+	}
+	for _, s := range skipped {
+		got[filepath.Base(s.Path)] = "skipped: " + s.Reason
+	}
+	want := map[string]string{
+		"mongod.log":      "log",
+		"mongod.log.1.gz": "log+gzip",
+		"logs.tar.gz":     "skipped: archive: extract it and run on the extracted files",
+		"core.bin":        "skipped: binary file that is not FTDC",
+		"noise.dat":       "skipped: binary file that is not FTDC",
+		"empty.log":       "skipped: empty",
+		"metrics.2026":    "ftdc",
+		"mongod.conf":     "log",
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s: got %q, want %q", name, got[name], w)
+		}
+	}
+	if _, ok := got[".DS_Store"]; ok {
+		t.Errorf("hidden file reported: %v", got)
+	}
+	if out := OutputRel(filepath.Join(root, "mongod.log.1.gz"), root, Log); out != "mongod.log.1_obfuscated.gz" {
+		t.Errorf("gzip output name %q", out)
+	}
+	if out := OutputRel(filepath.Join(root, "mongod.log.gz"), root, Log); out != "mongod_obfuscated.log.gz" {
+		t.Errorf("gzip output name %q", out)
 	}
 }
