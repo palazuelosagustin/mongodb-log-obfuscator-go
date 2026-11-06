@@ -2,11 +2,16 @@ package inputs
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
+
 	"fmt"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 type FileType string
@@ -19,6 +24,14 @@ const (
 type File struct {
 	Path string
 	Type FileType
+	// Gzip marks a gzip-compressed log; its output is compressed too.
+	Gzip bool
+}
+
+// Skipped is an input file that is not processed, and why.
+type Skipped struct {
+	Path   string
+	Reason string
 }
 
 type Options struct {
@@ -26,8 +39,12 @@ type Options struct {
 	FTDCOnly bool
 }
 
-func Resolve(args []string, excludeDir string, opts Options) ([]File, string, error) {
+// Resolve finds the input files. Files that are not processed are returned
+// in skipped with a reason, except hidden files, earlier outputs and mapping
+// files, which are ignored.
+func Resolve(args []string, excludeDir string, opts Options) ([]File, []Skipped, string, error) {
 	var files []File
+	var skipped []Skipped
 	var roots []string
 	for _, arg := range args {
 		matches := []string{arg}
@@ -35,7 +52,7 @@ func Resolve(args []string, excludeDir string, opts Options) ([]File, string, er
 			var err error
 			matches, err = filepath.Glob(arg)
 			if err != nil {
-				return nil, "", err
+				return nil, nil, "", err
 			}
 		}
 		for _, match := range matches {
@@ -46,19 +63,24 @@ func Resolve(args []string, excludeDir string, opts Options) ([]File, string, er
 			}
 			abs, err := filepath.Abs(match)
 			if err != nil {
-				return nil, "", err
+				return nil, nil, "", err
 			}
 			if info.IsDir() {
 				roots = append(roots, abs)
-				scanned, err := scanDirectory(abs, excludeDir, opts)
+				scanned, skips, err := scanDirectory(abs, excludeDir, opts)
 				if err != nil {
-					return nil, "", err
+					return nil, nil, "", err
 				}
 				files = append(files, scanned...)
+				skipped = append(skipped, skips...)
 				continue
 			}
-			if typ := classify(abs); typ != "" && allowed(typ, opts) {
-				files = append(files, File{Path: abs, Type: typ})
+			if f, reason := classify(abs); reason != "" {
+				if reason != ignore {
+					skipped = append(skipped, Skipped{Path: abs, Reason: reason})
+				}
+			} else if allowed(f.Type, opts) {
+				files = append(files, f)
 			}
 		}
 	}
@@ -76,11 +98,12 @@ func Resolve(args []string, excludeDir string, opts Options) ([]File, string, er
 	} else if cwd, err := os.Getwd(); err == nil {
 		inputRoot = cwd
 	}
-	return files, inputRoot, nil
+	return files, skipped, inputRoot, nil
 }
 
-func scanDirectory(root, excludeDir string, opts Options) ([]File, error) {
+func scanDirectory(root, excludeDir string, opts Options) ([]File, []Skipped, error) {
 	var files []File
+	var skipped []Skipped
 	excludeDir, _ = filepath.Abs(excludeDir)
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -94,40 +117,122 @@ func scanDirectory(root, excludeDir string, opts Options) ([]File, error) {
 			}
 			return nil
 		}
-		if typ := classify(path); typ != "" && allowed(typ, opts) {
-			abs, _ := filepath.Abs(path)
-			files = append(files, File{Path: abs, Type: typ})
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		abs, _ := filepath.Abs(path)
+		if f, reason := classify(abs); reason != "" {
+			if reason != ignore {
+				skipped = append(skipped, Skipped{Path: abs, Reason: reason})
+			}
+		} else if allowed(f.Type, opts) {
+			files = append(files, f)
 		}
 		return nil
 	})
-	return files, err
+	return files, skipped, err
 }
 
 func allowed(typ FileType, opts Options) bool {
 	return !(opts.LogOnly && typ != Log) && !(opts.FTDCOnly && typ != FTDC)
 }
 
-func classify(path string) FileType {
+// ignore is the reason of files skipped without a report.
+const ignore = "-"
+
+var archiveExts = []string{".tar.gz", ".tgz", ".tar", ".zip", ".bz2", ".xz", ".7z", ".rar", ".tar.bz2", ".tar.xz", ".zst"}
+
+// classify decides from the name and the first bytes what a file is. A
+// non-empty reason means the file is not processed.
+func classify(path string) (File, string) {
 	base := filepath.Base(path)
-	parent := filepath.Base(filepath.Dir(path))
 	if strings.HasPrefix(base, ".") || base == "cluster_mapping.json" || strings.HasSuffix(base, "_mapping.json") || strings.Contains(base, "_obfuscated") || strings.Contains(path, "_obfuscated") {
-		return ""
+		return File{}, ignore
 	}
-	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".gz", ".zip", ".bz2", ".xz", ".7z", ".rar"} {
-		if strings.HasSuffix(base, ext) {
-			return ""
+	for _, ext := range archiveExts {
+		if strings.HasSuffix(strings.ToLower(base), ext) {
+			return File{}, "archive: extract it and run on the extracted files"
 		}
 	}
-	if parent == "diagnostic.data" || strings.HasSuffix(base, ".ftdc") || strings.HasPrefix(base, "metrics.") || base == "metrics" {
-		return FTDC
+	head, err := readHead(path, 512)
+	if err != nil {
+		return File{}, "unreadable: " + err.Error()
 	}
-	if strings.HasSuffix(base, ".log") {
-		return Log
+	if len(head) == 0 {
+		return File{}, "empty"
 	}
-	if b, err := os.ReadFile(path); err == nil && len(b) > 0 && bytes.Contains(b[:min(len(b), 256)], []byte{0}) {
-		return FTDC
+	if len(head) >= 2 && head[0] == 0x1f && head[1] == 0x8b {
+		inner, err := gzipHead(path, 512)
+		if err != nil {
+			return File{}, "gzip: " + err.Error()
+		}
+		if !looksLikeText(inner) {
+			return File{}, "gzip file that does not hold text"
+		}
+		return File{Path: path, Type: Log, Gzip: true}, ""
 	}
-	return Log
+	if ftdc.Sniff(head) {
+		return File{Path: path, Type: FTDC}, ""
+	}
+	if !looksLikeText(head) {
+		return File{}, "binary file that is not FTDC"
+	}
+	return File{Path: path, Type: Log}, ""
+}
+
+// looksLikeText accepts UTF-8 without NUL bytes and with few control
+// characters (logs, configuration, command output).
+func looksLikeText(head []byte) bool {
+	if bytes.IndexByte(head, 0) >= 0 {
+		return false
+	}
+	// a multi-byte character may be cut at the end of head
+	for i := 0; i < utf8.UTFMax && len(head) > 0 && !utf8.Valid(head); i++ {
+		head = head[:len(head)-1]
+	}
+	if !utf8.Valid(head) {
+		return false
+	}
+	control := 0
+	for _, b := range head {
+		if b < 0x20 && b != '\n' && b != '\r' && b != '\t' && b != '\f' && b != 0x1b {
+			control++
+		}
+	}
+	return control*100 <= len(head)
+}
+
+func readHead(path string, n int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, n)
+	m, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	return buf[:m], nil
+}
+
+func gzipHead(path string, n int) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	buf := make([]byte, n)
+	m, err := io.ReadFull(zr, buf)
+	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+		return nil, err
+	}
+	return buf[:m], nil
 }
 
 func OutputPath(inputPath, inputRoot, outputRoot string, typ FileType) string {
@@ -136,7 +241,7 @@ func OutputPath(inputPath, inputRoot, outputRoot string, typ FileType) string {
 
 // OutputRel is the output path relative to the output root. It never leaves
 // the output root: a file outside inputRoot keeps only its base name.
-func OutputRel(inputPath, inputRoot string, typ FileType) string {
+func OutputRel(inputPath, inputRoot string, typ FileType) (out string) {
 	rel, err := filepath.Rel(inputRoot, inputPath)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		rel = filepath.Base(inputPath)
@@ -146,12 +251,20 @@ func OutputRel(inputPath, inputRoot string, typ FileType) string {
 	}
 	dir := filepath.Dir(rel)
 	base := filepath.Base(rel)
+	gz := strings.HasSuffix(base, ".gz")
+	base = strings.TrimSuffix(base, ".gz")
+	defer func() {
+		if gz {
+			out += ".gz"
+		}
+	}()
 	if strings.HasSuffix(base, ".log") {
 		base = strings.TrimSuffix(base, ".log") + "_obfuscated.log"
 	} else {
 		base += "_obfuscated"
 	}
-	return filepath.Join(dir, base)
+	out = filepath.Join(dir, base)
+	return out
 }
 
 func dedupe(files []File) []File {
@@ -182,11 +295,4 @@ func commonPath(paths []string) string {
 		}
 	}
 	return common
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

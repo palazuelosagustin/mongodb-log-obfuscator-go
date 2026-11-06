@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -30,25 +31,81 @@ type MetricChunk struct {
 	DeltaStream  []byte
 }
 
-func Iterate(data []byte) ([]RawDocument, error) {
-	var docs []RawDocument
-	for pos := 0; pos+4 <= len(data); {
-		docLen := int(int32(binary.LittleEndian.Uint32(data[pos : pos+4])))
-		if docLen <= 0 {
-			break
-		}
-		if docLen < 5 || pos+docLen > len(data) {
-			return docs, fmt.Errorf("truncated FTDC document at offset %d", pos)
-		}
-		raw := data[pos : pos+docLen]
-		var doc bson.D
-		if err := bson.Unmarshal(raw, &doc); err != nil {
-			return docs, fmt.Errorf("decode FTDC document at offset %d: %w", pos, err)
-		}
-		docs = append(docs, RawDocument{Offset: pos, Bytes: append([]byte(nil), raw...), Doc: doc})
-		pos += docLen
+// maxDocument bounds a BSON document (16 MB, with room for FTDC chunks).
+const maxDocument = 64 << 20
+
+// ErrTruncated reports a file that ends inside a document, as the
+// metrics.interim file of a running mongod can.
+var ErrTruncated = errors.New("truncated FTDC document")
+
+// Reader reads FTDC documents one at a time.
+type Reader struct {
+	r      io.Reader
+	offset int
+}
+
+func NewReader(r io.Reader) *Reader { return &Reader{r: r} }
+
+// Next returns the next document, io.EOF at a clean end, or an error that
+// wraps ErrTruncated when the file ends inside a document.
+func (rd *Reader) Next() (RawDocument, error) {
+	var head [4]byte
+	n, err := io.ReadFull(rd.r, head[:])
+	if err == io.EOF {
+		return RawDocument{}, io.EOF
 	}
-	return docs, nil
+	if err != nil {
+		return RawDocument{}, fmt.Errorf("%w at offset %d (%d trailing bytes)", ErrTruncated, rd.offset, n)
+	}
+	docLen := int(int32(binary.LittleEndian.Uint32(head[:])))
+	if docLen == 0 {
+		return RawDocument{}, io.EOF // zero padding after the last document
+	}
+	if docLen < 5 || docLen > maxDocument {
+		return RawDocument{}, fmt.Errorf("invalid FTDC document length %d at offset %d", docLen, rd.offset)
+	}
+	raw := make([]byte, docLen)
+	copy(raw, head[:])
+	if _, err := io.ReadFull(rd.r, raw[4:]); err != nil {
+		return RawDocument{}, fmt.Errorf("%w at offset %d", ErrTruncated, rd.offset)
+	}
+	var doc bson.D
+	if err := bson.Unmarshal(raw, &doc); err != nil {
+		return RawDocument{}, fmt.Errorf("decode FTDC document at offset %d: %w", rd.offset, err)
+	}
+	d := RawDocument{Offset: rd.offset, Bytes: raw, Doc: doc}
+	rd.offset += docLen
+	return d, nil
+}
+
+// Iterate decodes every document of data; it returns the documents read
+// before an error.
+func Iterate(data []byte) ([]RawDocument, error) {
+	rd := NewReader(bytes.NewReader(data))
+	var docs []RawDocument
+	for {
+		d, err := rd.Next()
+		if err == io.EOF {
+			return docs, nil
+		}
+		if err != nil {
+			return docs, err
+		}
+		docs = append(docs, d)
+	}
+}
+
+// Sniff reports whether head (the start of a file) is an FTDC file: a BSON
+// document whose first field is "_id" (a date), as every FTDC document has.
+func Sniff(head []byte) bool {
+	if len(head) < 10 {
+		return false
+	}
+	docLen := int(int32(binary.LittleEndian.Uint32(head[:4])))
+	if docLen < 10 || docLen > maxDocument {
+		return false
+	}
+	return head[4] == 0x09 && bytes.HasPrefix(head[5:], []byte("_id\x00"))
 }
 
 func Type(doc bson.D) (int32, bool) {

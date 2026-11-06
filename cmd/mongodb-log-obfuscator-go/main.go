@@ -51,6 +51,7 @@ func runVerifyCommand(args []string) int {
 	var mapping, mappingAlias string
 	fs.StringVar(&mapping, "mapping", "", "mapping JSON written by the obfuscation")
 	fs.StringVar(&mappingAlias, "m", "", "alias for --mapping")
+	jobs := fs.Int("jobs", runtime.NumCPU(), "parallel worker count")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -58,7 +59,7 @@ func runVerifyCommand(args []string) int {
 		mapping = mappingAlias
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR")
+		fmt.Fprintln(os.Stderr, "usage: mongodb-log-obfuscator-go verify [--mapping FILE] [--jobs N] OUTPUT_DIR")
 		return 2
 	}
 	dir := fs.Arg(0)
@@ -77,7 +78,7 @@ func runVerifyCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "Warning: no mapping at %s; checking only emails, public IPs, card numbers and LDAP names\n", mapping)
 		mapping = ""
 	}
-	if err := runVerify(dir, mapping, reg); err != nil {
+	if err := runVerify(dir, mapping, reg, *jobs); err != nil {
 		if errors.Is(err, errLeaks) {
 			return exitLeaks
 		}
@@ -87,8 +88,8 @@ func runVerifyCommand(args []string) int {
 	return 0
 }
 
-func runVerify(dir, mappingPath string, reg *registry.Registry) error {
-	report, err := verify.Dir(dir, verify.Options{Mapping: reg.Report(), MappingPath: mappingPath})
+func runVerify(dir, mappingPath string, reg *registry.Registry, jobs int) error {
+	report, err := verify.Dir(dir, verify.Options{Mapping: reg.Report(), MappingPath: mappingPath, Jobs: jobs})
 	if err != nil {
 		return err
 	}
@@ -178,11 +179,12 @@ func obfuscate(args []string) error {
 	if err != nil {
 		return err
 	}
-	files, inputRoot, err := inputs.Resolve(inputArgs, outputRoot, inputs.Options{LogOnly: logOnly, FTDCOnly: ftdcOnly})
+	files, skipped, inputRoot, err := inputs.Resolve(inputArgs, outputRoot, inputs.Options{LogOnly: logOnly, FTDCOnly: ftdcOnly})
 	if err != nil {
 		return err
 	}
 	if len(files) == 0 {
+		printMessages("Skipped", skippedMessages(skipped), inputRoot)
 		return fmt.Errorf("no log or FTDC files found")
 	}
 	if out == "" {
@@ -227,11 +229,14 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Found %d file(s)\n", len(files))
+	printMessages("Skipped", skippedMessages(skipped), inputRoot)
 	start := time.Now()
 	summary, err := processor.Run(processor.Config{Files: files, InputRoot: inputRoot, OutputRoot: outputRoot, MappingPath: mapping, Jobs: jobs, DryRun: dryRun, Registry: reg})
 	if err != nil {
 		return err
 	}
+	printMessages("Warning for", summary.Warnings, inputRoot)
+	printMessages("Failed (not written)", summary.Failures, inputRoot)
 	fmt.Fprintf(os.Stderr, "Discovered %d replacements in %s\n", summary.Replacements, summary.DiscoverTime.Round(time.Millisecond))
 	fmt.Fprintf(os.Stderr, "Payload redaction: enabled\n")
 	if dryRun {
@@ -246,9 +251,37 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Done in %s.\n", time.Since(start).Round(time.Millisecond))
 	if doVerify {
 		fmt.Fprintln(os.Stderr)
-		return runVerify(outputRoot, mapping, reg)
+		if err := runVerify(outputRoot, mapping, reg, jobs); err != nil {
+			return err
+		}
+	}
+	if len(summary.Failures) > 0 {
+		return fmt.Errorf("%d file(s) could not be obfuscated and were not written (listed above)", len(summary.Failures))
 	}
 	return nil
+}
+
+func skippedMessages(skipped []inputs.Skipped) []processor.FileMessage {
+	out := make([]processor.FileMessage, len(skipped))
+	for i, s := range skipped {
+		out[i] = processor.FileMessage{Path: s.Path, Message: s.Reason}
+	}
+	return out
+}
+
+// printMessages lists files with a message, paths relative to the input root.
+func printMessages(title string, msgs []processor.FileMessage, root string) {
+	if len(msgs) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s %d file(s):\n", title, len(msgs))
+	for _, m := range msgs {
+		path := m.Path
+		if rel, err := filepath.Rel(root, path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", path, m.Message)
+	}
 }
 func initialOutputRoot(firstInput, out string) (string, error) {
 	if out != "" {
@@ -306,7 +339,8 @@ Flags:
   --out, -o, --output-dir DIR   Root directory for obfuscated output
   --mapping, -m FILE            Shared mapping JSON path
   --load-mapping FILE           Load an existing mapping JSON
-  --jobs N                      Parallel worker count
+  --jobs N                      Parallel workers (default: CPU count); large files are
+                                split into blocks of lines processed in parallel
   --profile DIR                 Write cpu.pprof and mem.pprof
   --dry-run                     Discover only; do not write output
   --log-only                    Process only log files
@@ -314,7 +348,7 @@ Flags:
   --verify                      Check the output for possible leaks (exit 3 if any)
   --keep-equality               Redacted strings become keyed hashes (obf_...): equal values stay equal
 
-  mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR
+  mongodb-log-obfuscator-go verify [--mapping FILE] [--jobs N] OUTPUT_DIR
                                 Check an obfuscated directory; exit 3 on possible leaks
 
 The mapping defaults to OUTPUT_DIR_mapping.json, next to the output directory

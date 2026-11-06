@@ -3,6 +3,7 @@ package processor
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
@@ -42,8 +44,17 @@ type Summary struct {
 	PayloadRedactions int
 	DiscoverTime      time.Duration
 	ReplaceTime       time.Duration
-	// Outputs are the written paths, in the order of Config.Files.
+	// Outputs are the written paths.
 	Outputs []string
+	// Failures are files not written; Warnings are files written with a
+	// problem (truncated FTDC, dropped documents).
+	Failures []FileMessage
+	Warnings []FileMessage
+}
+
+type FileMessage struct {
+	Path    string
+	Message string
 }
 
 // OutputPath is where the obfuscated copy of f is written: its path relative
@@ -72,25 +83,34 @@ func Run(cfg Config) (Summary, error) {
 		cfg.Jobs = 1
 	}
 	sort.Slice(cfg.Files, func(i, j int) bool { return cfg.Files[i].Path < cfg.Files[j].Path })
-	summary := Summary{Files: len(cfg.Files)}
-	for _, f := range cfg.Files {
+	summary := Summary{}
+	// One pool of --jobs workers for all files: many small files and one
+	// large file both use every worker.
+	pool := pipeline.NewPool(cfg.Jobs)
+	defer pool.Close()
+	start := time.Now()
+	results := discoverAll(cfg.Files, cfg.Jobs, pool)
+	summary.DiscoverTime = time.Since(start)
+	var files []inputs.File
+	var collectors []*registry.Collector
+	for _, r := range results {
+		for _, w := range r.result.Warnings {
+			summary.Warnings = append(summary.Warnings, FileMessage{Path: r.file.Path, Message: w})
+		}
+		if r.err != nil {
+			// A file that cannot be read is not written: its names were not
+			// discovered, so its copy could not be obfuscated reliably.
+			summary.Failures = append(summary.Failures, FileMessage{Path: r.file.Path, Message: r.err.Error()})
+			continue
+		}
+		files = append(files, r.file)
+		collectors = append(collectors, r.result.Collector)
+	}
+	for _, f := range files {
 		if f.Type == inputs.Log {
 			summary.LogFiles++
 		} else if f.Type == inputs.FTDC {
 			summary.FTDCFiles++
-		}
-	}
-	start := time.Now()
-	results, err := discoverAll(cfg.Files, cfg.Jobs)
-	summary.DiscoverTime = time.Since(start)
-	if err != nil {
-		return summary, err
-	}
-	collectors := make([]*registry.Collector, len(results))
-	for i, r := range results {
-		collectors[i] = r.result.Collector
-		for _, w := range r.result.Warnings {
-			fmt.Fprintf(os.Stderr, "  Warning: %s: %s\n", r.file.Path, w)
 		}
 	}
 	cfg.Registry.MergeCollectors(collectors)
@@ -104,17 +124,25 @@ func Run(cfg Config) (Summary, error) {
 	}
 	matcher := newObfuscator(cfg.Registry)
 	names := replace.New(reps)
-	outPaths := make([]string, len(cfg.Files))
-	for i, f := range cfg.Files {
+	outPaths := make([]string, len(files))
+	for i, f := range files {
 		outPaths[i] = OutputPath(f, cfg.InputRoot, cfg.OutputRoot, names)
 	}
-	summary.Outputs = outPaths
 	start = time.Now()
-	redactions, err := replaceAll(cfg.Files, outPaths, cfg.Jobs, matcher)
-	if err != nil {
-		return summary, err
+	for _, r := range replaceAll(files, outPaths, cfg.Jobs, pool, matcher) {
+		summary.PayloadRedactions += r.redactions
+		for _, w := range r.warnings {
+			if !alreadyWarned(summary.Warnings, r.file.Path, w) {
+				summary.Warnings = append(summary.Warnings, FileMessage{Path: r.file.Path, Message: w})
+			}
+		}
+		if r.err != nil {
+			summary.Failures = append(summary.Failures, FileMessage{Path: r.file.Path, Message: r.err.Error()})
+			continue
+		}
+		summary.Files++
+		summary.Outputs = append(summary.Outputs, r.out)
 	}
-	summary.PayloadRedactions = redactions
 	summary.ReplaceTime = time.Since(start)
 	if err := os.MkdirAll(filepath.Dir(cfg.MappingPath), 0o755); err != nil {
 		return summary, err
@@ -125,7 +153,19 @@ func Run(cfg Config) (Summary, error) {
 	return summary, nil
 }
 
-func discoverAll(files []inputs.File, jobs int) ([]fileResult, error) {
+// alreadyWarned reports a warning of discovery that the write step repeats
+// with more detail; the detailed one replaces it.
+func alreadyWarned(warnings []FileMessage, path, msg string) bool {
+	for i, w := range warnings {
+		if w.Path == path && strings.HasPrefix(msg, w.Message) {
+			warnings[i].Message = msg
+			return true
+		}
+	}
+	return false
+}
+
+func discoverAll(files []inputs.File, jobs int, pool *pipeline.Pool) []fileResult {
 	type job struct {
 		index int
 		file  inputs.File
@@ -141,9 +181,9 @@ func discoverAll(files []inputs.File, jobs int) ([]fileResult, error) {
 				var r discover.Result
 				var err error
 				if j.file.Type == inputs.Log {
-					r, err = discover.LogFile(j.file.Path)
+					r, err = discover.LogFile(j.file.Path, j.file.Gzip, pool)
 				} else {
-					r, err = discover.FTDCFile(j.file.Path)
+					pool.Do(func() { r, err = discover.FTDCFile(j.file.Path) })
 				}
 				results[j.index] = fileResult{file: j.file, result: r, err: err}
 			}
@@ -154,161 +194,218 @@ func discoverAll(files []inputs.File, jobs int) ([]fileResult, error) {
 	}
 	close(jobsCh)
 	wg.Wait()
-	for _, r := range results {
-		if r.err != nil {
-			return results, r.err
-		}
-	}
-	return results, nil
+	return results
 }
 
-func replaceAll(files []inputs.File, outPaths []string, jobs int, matcher *obfuscator) (int, error) {
-	type job struct {
-		file inputs.File
-		out  string
-	}
-	type result struct {
-		redactions int
-		err        error
-	}
-	jobsCh := make(chan job)
-	resultCh := make(chan result, len(files))
+type replaceResult struct {
+	file       inputs.File
+	out        string
+	redactions int
+	warnings   []string
+	err        error
+}
+
+// replaceAll writes every output; a file that fails has its partial output
+// removed and does not stop the others.
+func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline.Pool, matcher *obfuscator) []replaceResult {
+	jobsCh := make(chan int)
+	results := make([]replaceResult, len(files))
 	var wg sync.WaitGroup
 	for i := 0; i < jobs; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := range jobsCh {
-				if err := os.MkdirAll(filepath.Dir(j.out), 0o755); err != nil {
-					resultCh <- result{err: err}
-					continue
-				}
-				var n int
-				var err error
-				if j.file.Type == inputs.Log {
-					n, err = replaceLog(j.file.Path, j.out, matcher)
+			for idx := range jobsCh {
+				f, out := files[idx], outPaths[idx]
+				res := replaceResult{file: f, out: out}
+				if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+					res.err = err
+				} else if f.Type == inputs.Log {
+					res.redactions, res.err = replaceLog(f.Path, out, f.Gzip, pool, matcher)
 				} else {
-					n, err = replaceFTDC(j.file.Path, j.out, matcher)
+					pool.Do(func() { res.redactions, res.warnings, res.err = replaceFTDC(f.Path, out, matcher) })
 				}
-				resultCh <- result{redactions: n, err: err}
+				if res.err != nil {
+					os.Remove(out)
+				}
+				results[idx] = res
 			}
 		}()
 	}
-	for i, f := range files {
-		jobsCh <- job{file: f, out: outPaths[i]}
+	for i := range files {
+		jobsCh <- i
 	}
 	close(jobsCh)
 	wg.Wait()
-	close(resultCh)
-	total := 0
-	for r := range resultCh {
-		total += r.redactions
-		if r.err != nil {
-			return total, r.err
-		}
-	}
-	return total, nil
+	return results
 }
 
-func replaceLog(inPath, outPath string, matcher *obfuscator) (int, error) {
+// replaceLog obfuscates a log in parallel blocks of lines, written in input
+// order. A compressed log is written compressed, one gzip member per block
+// (gzip readers read concatenated members as one stream), so compression
+// runs in parallel too.
+func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *obfuscator) (total int, err error) {
 	in, err := os.Open(inPath)
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
+	var src io.Reader = in
+	if gz {
+		zr, err := gzip.NewReader(bufio.NewReaderSize(in, 1<<20))
+		if err != nil {
+			return 0, err
+		}
+		defer zr.Close()
+		src = zr
+	}
 	out, err := os.Create(outPath)
 	if err != nil {
 		return 0, err
 	}
-	defer out.Close()
-	r := bufio.NewReaderSize(in, 1024*1024)
-	w := bufio.NewWriterSize(out, 1024*1024)
-	defer w.Flush()
-	total := 0
-	for {
-		line, err := r.ReadString('\n')
-		if line != "" {
-			repl, n, e := matcher.logLine(line)
-			if e != nil {
-				return total, e
-			}
-			total += n
-			if _, e := w.WriteString(repl); e != nil {
-				return total, e
-			}
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
 		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return total, nil
-			}
-			return total, err
-		}
+	}()
+	w := bufio.NewWriterSize(out, 1<<20)
+	type block struct {
+		data []byte
+		n    int
 	}
+	err = pipeline.Lines(pool, src, func(in []byte, _ int) (block, error) {
+		var buf bytes.Buffer
+		buf.Grow(len(in) + len(in)/8)
+		var dst io.Writer = &buf
+		var zw *gzip.Writer
+		if gz {
+			zw, _ = gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+			dst = zw
+		}
+		n := 0
+		err := pipeline.EachLine(in, func(line []byte) error {
+			repl, c, err := matcher.logLine(string(line))
+			if err != nil {
+				return err
+			}
+			n += c
+			_, err = io.WriteString(dst, repl)
+			return err
+		})
+		if err != nil {
+			return block{}, err
+		}
+		if zw != nil {
+			if err := zw.Close(); err != nil {
+				return block{}, err
+			}
+		}
+		return block{buf.Bytes(), n}, nil
+	}, func(b block) error {
+		total += b.n
+		_, err := w.Write(b.data)
+		return err
+	})
+	if err != nil {
+		return total, err
+	}
+	return total, w.Flush()
 }
 
-func replaceFTDC(inPath, outPath string, matcher *obfuscator) (int, error) {
-	data, err := os.ReadFile(inPath)
+// replaceFTDC streams an FTDC file document by document. Documents that
+// cannot be decoded and obfuscated are dropped with a warning rather than
+// copied: they may hold names. A file that ends inside a document (the
+// metrics.interim of a running mongod) keeps its complete documents.
+func replaceFTDC(inPath, outPath string, matcher *obfuscator) (total int, warnings []string, err error) {
+	in, err := os.Open(inPath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	docs, err := ftdc.Iterate(data)
-	if err != nil {
-		return 0, err
-	}
+	defer in.Close()
 	out, err := os.Create(outPath)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	defer out.Close()
-	w := bufio.NewWriterSize(out, 1024*1024)
-	defer w.Flush()
-	total := 0
-	for _, raw := range docs {
-		doc := raw.Doc
-		t, ok := ftdc.Type(doc)
-		if !ok {
-			if _, err := w.Write(raw.Bytes); err != nil {
-				return total, err
-			}
-			continue
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
 		}
-		switch t {
-		case ftdc.TypeMetadata, ftdc.TypePeriodicMetadata:
-			if inner, ok := ftdc.DocField(doc, "doc"); ok {
-				ob, n := matcher.bsonDoc(inner, false)
-				total += n
-				doc = ftdc.ReplaceField(doc, "doc", ob)
+	}()
+	w := bufio.NewWriterSize(out, 1<<20)
+	rd := ftdc.NewReader(bufio.NewReaderSize(in, 1<<20))
+	dropped := 0
+	for {
+		raw, rerr := rd.Next()
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			if errors.Is(rerr, ftdc.ErrTruncated) {
+				warnings = append(warnings, rerr.Error()+"; the incomplete document is dropped")
+				break
 			}
-		case ftdc.TypeMetricChunk:
-			if bin, ok := ftdc.BinaryField(doc, "data"); ok {
-				chunk, err := ftdc.DecompressMetricChunk(bin.Data)
-				if err == nil {
-					var ref bson.D
-					if err := bson.Unmarshal(chunk.RefBSON, &ref); err == nil {
-						ob, n := matcher.bsonDoc(ref, false)
-						total += n
-						chunk.RefBSON, err = bson.Marshal(ob)
-						if err != nil {
-							return total, err
-						}
-						newChunk, err := ftdc.RecompressMetricChunk(chunk)
-						if err != nil {
-							return total, err
-						}
-						doc = ftdc.ReplaceField(doc, "data", primitive.Binary{Subtype: bin.Subtype, Data: newChunk})
-					}
-				}
-			}
+			return total, warnings, rerr
+		}
+		doc, n, ok := obfuscateFTDCDocument(raw.Doc, matcher)
+		total += n
+		if !ok {
+			dropped++
+			continue
 		}
 		enc, err := bson.Marshal(doc)
 		if err != nil {
-			return total, err
+			return total, warnings, err
 		}
 		if _, err := w.Write(enc); err != nil {
-			return total, err
+			return total, warnings, err
 		}
 	}
-	return total, nil
+	if dropped > 0 {
+		warnings = append(warnings, fmt.Sprintf("%d FTDC document(s) could not be decoded and were dropped", dropped))
+	}
+	return total, warnings, w.Flush()
+}
+
+// obfuscateFTDCDocument returns the obfuscated document, or ok=false when it
+// cannot be decoded.
+func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) {
+	t, ok := ftdc.Type(doc)
+	if !ok {
+		return nil, 0, false
+	}
+	switch t {
+	case ftdc.TypeMetadata, ftdc.TypePeriodicMetadata:
+		inner, ok := ftdc.DocField(doc, "doc")
+		if !ok {
+			return doc, 0, true
+		}
+		ob, n := matcher.bsonDoc(inner, false)
+		return ftdc.ReplaceField(doc, "doc", ob), n, true
+	case ftdc.TypeMetricChunk:
+		bin, ok := ftdc.BinaryField(doc, "data")
+		if !ok {
+			return nil, 0, false
+		}
+		chunk, err := ftdc.DecompressMetricChunk(bin.Data)
+		if err != nil {
+			return nil, 0, false
+		}
+		var ref bson.D
+		if err := bson.Unmarshal(chunk.RefBSON, &ref); err != nil {
+			return nil, 0, false
+		}
+		ob, n := matcher.bsonDoc(ref, false)
+		if chunk.RefBSON, err = bson.Marshal(ob); err != nil {
+			return nil, 0, false
+		}
+		newChunk, err := ftdc.RecompressMetricChunk(chunk)
+		if err != nil {
+			return nil, 0, false
+		}
+		return ftdc.ReplaceField(doc, "data", primitive.Binary{Subtype: bin.Subtype, Data: newChunk}), n, true
+	default:
+		return nil, 0, false
+	}
 }
 
 // obfuscator applies the shared mapping: values to string values, keys to

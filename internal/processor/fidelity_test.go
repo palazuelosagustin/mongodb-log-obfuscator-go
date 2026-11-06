@@ -19,7 +19,7 @@ func obfuscateLines(t *testing.T, lines ...string) ([]string, *registry.Registry
 	if err := writeFile(path, strings.Join(lines, "\n")+"\n"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := discover.LogFile(path)
+	res, err := discover.LogFile(path, false)
 	if err != nil {
 		t.Fatal(err)
 	}

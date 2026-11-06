@@ -8,8 +8,8 @@ package verify
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,10 +19,12 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ahocorasick"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
@@ -61,6 +63,8 @@ type Options struct {
 	MappingPath string
 	// MaxSamples bounds Report.Samples (one per distinct value); default 50.
 	MaxSamples int
+	// Jobs is the number of workers (default 1).
+	Jobs int
 }
 
 // Categories whose originals count as leaks when found in a key. Field names
@@ -96,6 +100,37 @@ type checker struct {
 	ac        *ahocorasick.Matcher
 	report    Report
 	seen      map[string]bool
+	mu        sync.Mutex // guards report and seen of the top checker
+}
+
+// fork returns a checker for one block or file that shares the patterns.
+func (c *checker) fork() *checker {
+	return &checker{opts: c.opts, originals: c.originals, ac: c.ac, seen: map[string]bool{}, report: Report{Counts: map[string]int{}}}
+}
+
+// merge adds the findings of a fork.
+func (c *checker) merge(f *checker) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.report.Total += f.report.Total
+	c.report.Lines += f.report.Lines
+	c.report.Files += f.report.Files
+	for label, n := range f.report.Counts {
+		c.report.Counts[label] += n
+	}
+	c.report.Warnings = append(c.report.Warnings, f.report.Warnings...)
+	for _, s := range f.report.Samples {
+		label := s.Kind
+		if s.Category != "" {
+			label += " " + s.Category
+		}
+		id := label + "\x00" + s.Hint
+		if c.seen[id] || len(c.report.Samples) >= c.opts.MaxSamples {
+			continue
+		}
+		c.seen[id] = true
+		c.report.Samples = append(c.report.Samples, s)
+	}
 }
 
 // Dir checks every file below dir.
@@ -133,6 +168,7 @@ func Dir(dir string, opts Options) (Report, error) {
 	if opts.MappingPath != "" {
 		mappingAbs, _ = filepath.Abs(opts.MappingPath)
 	}
+	var paths []string
 	err = filepath.WalkDir(absDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -146,12 +182,49 @@ func Dir(dir string, opts Options) (Report, error) {
 			c.add(Finding{File: rel, Kind: "mapping-file", Hint: "a mapping file reverses the obfuscation; keep it outside the shared directory"})
 			return nil
 		}
-		c.report.Files++
-		if isFTDC(path) {
-			return c.ftdcFile(path, rel)
-		}
-		return c.textFile(path, rel)
+		paths = append(paths, path)
+		return nil
 	})
+	if err != nil {
+		return c.report, err
+	}
+	pool := pipeline.NewPool(opts.Jobs)
+	defer pool.Close()
+	files := make(chan string)
+	errs := make(chan error, len(paths))
+	var wg sync.WaitGroup
+	for i := 0; i < pool.Size(); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range files {
+				rel, _ := filepath.Rel(absDir, path)
+				var err error
+				if isFTDC(path) {
+					f := c.fork()
+					pool.Do(func() { err = f.ftdcFile(path, rel) })
+					f.report.Files = 1
+					c.merge(f)
+				} else {
+					err = c.textFile(path, rel, pool)
+				}
+				if err != nil {
+					errs <- fmt.Errorf("%s: %w", rel, err)
+				}
+			}
+		}()
+	}
+	for _, p := range paths {
+		files <- p
+	}
+	close(files)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if err == nil {
+			err = e
+		}
+	}
 	sort.SliceStable(c.report.Samples, func(i, j int) bool {
 		a, b := c.report.Samples[i], c.report.Samples[j]
 		if a.File != b.File {
@@ -163,42 +236,48 @@ func Dir(dir string, opts Options) (Report, error) {
 }
 
 func isFTDC(path string) bool {
-	base := filepath.Base(path)
-	if filepath.Base(filepath.Dir(path)) == "diagnostic.data" || strings.HasPrefix(base, "metrics.") || strings.HasSuffix(base, ".ftdc") {
-		return true
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	head := make([]byte, 256)
-	n, _ := f.Read(head)
-	return bytes.IndexByte(head[:n], 0) >= 0
+	head := make([]byte, 16)
+	n, _ := io.ReadFull(f, head)
+	return ftdc.Sniff(head[:n])
 }
 
-func (c *checker) textFile(path, rel string) error {
+// textFile checks a text file in parallel blocks of lines.
+func (c *checker) textFile(path, rel string, pool *pipeline.Pool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1<<20)
-	lineNo := 0
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
-			lineNo++
-			c.report.Lines++
-			c.line(bytes.TrimRight(line, "\r\n"), rel, lineNo)
-		}
+	br := bufio.NewReaderSize(f, 1<<20)
+	var src io.Reader = br
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		zr, err := gzip.NewReader(br)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
 			return err
 		}
+		defer zr.Close()
+		src = zr
 	}
+	c.merge(&checker{report: Report{Files: 1, Counts: map[string]int{}}})
+	return pipeline.Lines(pool, src, func(block []byte, first int) (*checker, error) {
+		f := c.fork()
+		lineNo := first
+		pipeline.EachLine(block, func(line []byte) error {
+			f.report.Lines++
+			f.line(bytes.TrimRight(line, "\r\n"), rel, lineNo)
+			lineNo++
+			return nil
+		})
+		return f, nil
+	}, func(f *checker) error {
+		c.merge(f)
+		return nil
+	})
 }
 
 func (c *checker) line(line []byte, rel string, lineNo int) {
@@ -238,15 +317,21 @@ func (c *checker) walkJSON(v any, path []string, rel string, lineNo int) {
 }
 
 func (c *checker) ftdcFile(path, rel string) error {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	docs, err := ftdc.Iterate(data)
-	if err != nil {
-		c.report.Warnings = append(c.report.Warnings, fmt.Sprintf("%s: %v", rel, err))
-	}
-	for _, raw := range docs {
+	defer f.Close()
+	rd := ftdc.NewReader(bufio.NewReaderSize(f, 1<<20))
+	for {
+		raw, err := rd.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			c.report.Warnings = append(c.report.Warnings, fmt.Sprintf("%s: %v", rel, err))
+			return nil
+		}
 		t, ok := ftdc.Type(raw.Doc)
 		if !ok {
 			continue
@@ -273,7 +358,6 @@ func (c *checker) ftdcFile(path, rel string) error {
 			c.walkBSON(ref, nil, rel)
 		}
 	}
-	return nil
 }
 
 func (c *checker) walkBSON(v any, path []string, rel string) {

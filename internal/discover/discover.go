@@ -3,6 +3,7 @@ package discover
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"go.mongodb.org/mongo-driver/bson"
@@ -29,42 +31,75 @@ type Scanner struct {
 	warnings []string
 }
 
-func LogFile(path string) (Result, error) {
+// LogFile discovers the names in a log file, in parallel blocks of lines
+// when pool is not nil.
+func LogFile(path string, gz bool, pool ...*pipeline.Pool) (Result, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return Result{}, err
+	}
+	defer f.Close()
+	var src io.Reader = f
+	if gz {
+		zr, err := gzip.NewReader(bufio.NewReaderSize(f, 1<<20))
+		if err != nil {
+			return Result{}, err
+		}
+		defer zr.Close()
+		src = zr
+	}
+	p := (*pipeline.Pool)(nil)
+	if len(pool) > 0 {
+		p = pool[0]
+	}
+	if p == nil {
+		p = pipeline.NewPool(1)
+		defer p.Close()
+	}
+	total := Result{Collector: registry.NewCollector()}
+	err = pipeline.Lines(p, src, func(block []byte, _ int) (Result, error) {
+		s := &Scanner{c: registry.NewCollector()}
+		count := 0
+		pipeline.EachLine(block, func(line []byte) error {
+			count++
+			s.discoverLogLine(bytes.TrimSpace(line))
+			return nil
+		})
+		return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
+	}, func(r Result) error {
+		total.Collector.Merge(r.Collector)
+		total.Count += r.Count
+		total.Warnings = append(total.Warnings, r.Warnings...)
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return total, nil
+}
+
+func FTDCFile(path string) (Result, error) {
 	s := &Scanner{c: registry.NewCollector()}
 	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
-	r := bufio.NewReaderSize(f, 1024*1024)
+	rd := ftdc.NewReader(bufio.NewReaderSize(f, 1<<20))
 	count := 0
 	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
-			count++
-			s.discoverLogLine(bytes.TrimSpace(line))
+		raw, err := rd.Next()
+		if err == io.EOF {
+			break
 		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, ftdc.ErrTruncated) {
+				s.warn(err.Error())
 				break
 			}
 			return Result{}, err
 		}
-	}
-	return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
-}
-
-func FTDCFile(path string) (Result, error) {
-	s := &Scanner{c: registry.NewCollector()}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Result{}, err
-	}
-	docs, err := ftdc.Iterate(data)
-	if err != nil {
-		s.warn(err.Error())
-	}
-	for _, raw := range docs {
+		count++
 		t, ok := ftdc.Type(raw.Doc)
 		if !ok {
 			continue
@@ -92,7 +127,7 @@ func FTDCFile(path string) (Result, error) {
 			s.deepDiscoverBSON(ref, 0, false)
 		}
 	}
-	return Result{Collector: s.c, Count: len(docs), Warnings: s.warnings}, nil
+	return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
 }
 
 func (s *Scanner) warn(msg string)                 { s.warnings = append(s.warnings, msg) }

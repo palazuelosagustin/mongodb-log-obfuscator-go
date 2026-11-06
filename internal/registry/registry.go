@@ -68,6 +68,18 @@ func (c *Collector) Register(category, value string) {
 // set name seen in free text is still a replica set name.
 var priority = []string{"replset", "shard", "database", "collection", "user", "email", "cert_subject", "fqdn", "hostname", "domain", "ip", "path", "appname", "org", "location", "java_class", "data"}
 
+// Merge adds the values of other.
+func (c *Collector) Merge(other *Collector) {
+	for cat, values := range other.Values {
+		if c.Values[cat] == nil {
+			c.Values[cat] = map[string]struct{}{}
+		}
+		for v := range values {
+			c.Values[cat][v] = struct{}{}
+		}
+	}
+}
+
 func (r *Registry) MergeCollectors(collectors []*Collector) {
 	for _, cat := range priority {
 		values := map[string]struct{}{}
