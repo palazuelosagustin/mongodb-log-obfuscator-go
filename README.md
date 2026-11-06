@@ -222,6 +222,13 @@ values are replaced with type-safe placeholders such as `obfuscated string`, `0`
 `false`, and valid Extended JSON placeholders like `1970-01-01T00:00:00Z` for
 `$date` values.
 
+After the mapping, a safety net replaces what still looks like a host name,
+IP address, email or customer path in any kept string with
+`obfuscated-host`, `192.0.2.1`, `obfuscated@example.com` or
+`/obfuscated/path`: only the matched part, so messages stay readable.
+Replacements made by the mapping, system and default MongoDB paths, JDK and
+vendor names are left alone.
+
 Every string inside a command is replaced unless its key is on a short list
 of values needed for diagnosis: collection, database and user names (which are
 mapped), index names, enum-like options (`readConcern.level`, `w`, `mode`,
@@ -277,12 +284,13 @@ the config locally with `goreleaser release --snapshot --clean`.
 
 ## Agent skill
 
-`skills/.claude/mongodb-log-obfuscator/` is a Claude Code skill that tells an
-agent to obfuscate and verify customer logs before reading them, and how to
+`skills/.claude/mongodb-log-obfuscator-go/` is a Claude Code skill (with the
+same text for Codex in `skills/.codex/mongodb-log-obfuscator-go/`) that tells
+an agent to obfuscate and verify customer logs before reading them, and how to
 use the output with `mongodb-logstat` and `mongodb-ftdcstat`. Install it with:
 
 ```bash
-ln -s ~/bin/mongodb-log-obfuscator-go/skills/.claude/mongodb-log-obfuscator ~/.claude/skills/mongodb-log-obfuscator
+ln -s ~/bin/mongodb-log-obfuscator-go/skills/.claude/mongodb-log-obfuscator-go ~/.claude/skills/mongodb-log-obfuscator-go
 ```
 
 ## Development

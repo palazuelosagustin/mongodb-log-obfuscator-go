@@ -502,18 +502,31 @@ func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) 
 type obfuscator struct {
 	values *replace.Matcher
 	keys   *replace.Matcher
+	// net replaces names the mapping does not know (see redact.SafetyNet).
+	net *redact.SafetyNet
 }
 
 func newObfuscator(reg *registry.Registry) *obfuscator {
+	reps := reg.Replacements()
+	values := make([]string, 0, len(reps))
+	for _, r := range reps {
+		values = append(values, r.Value)
+	}
 	return &obfuscator{
-		values: replace.New(reg.Replacements()),
+		values: replace.New(reps),
 		keys:   replace.New(reg.ReplacementsFor(registry.NetworkAndPathCategories...)),
+		net:    redact.NewSafetyNet(values),
 	}
 }
 
-// text maps and scrubs free text: string values, log prefixes.
-func (o *obfuscator) text(s string) (string, int) {
-	return redact.ScrubText(o.values.Apply(s))
+// text maps and scrubs free text (string values, log prefixes) and applies
+// the safety net; key is the key the string is stored under, if any.
+func (o *obfuscator) text(s string) (string, int) { return o.textKey(s, "") }
+
+func (o *obfuscator) textKey(s, key string) (string, int) {
+	mapped, n := redact.ScrubText(o.values.Apply(s))
+	out, m := o.net.Apply(key, mapped)
+	return out, n + m
 }
 
 func (o *obfuscator) key(k string) string {
@@ -697,7 +710,7 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 			after := redact.Token(x)
 			return after, countStringChange(x, after)
 		}
-		return o.text(x)
+		return o.textKey(x, key)
 	default:
 		return v, 0
 	}
@@ -797,7 +810,7 @@ func (o *obfuscator) bsonValue(v any, key string, inCommand bool) (any, int) {
 			after := redact.Token(x)
 			return after, countStringChange(x, after)
 		}
-		return o.text(x)
+		return o.textKey(x, key)
 	case bson.D:
 		return o.bsonDoc(x, inCommand)
 	case bson.A:

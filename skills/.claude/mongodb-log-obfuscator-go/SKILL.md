@@ -1,9 +1,9 @@
 ---
-name: mongodb-log-obfuscator
-description: Obfuscate customer MongoDB logs and FTDC diagnostic data before an agent reads them, with mongodb-log-obfuscator-go, and check the result. Use before analysing logs or diagnostic.data from a customer case with an agent, or when the user asks to obfuscate, sanitize, anonymize or redact MongoDB logs/FTDC, to check obfuscated output for leaks, or to explain the obfuscator's output, mapping or exit status. Not for analysing the logs (use mongodb-logstat and mongodb-ftdcstat on the obfuscated output) or for other databases.
+name: mongodb-log-obfuscator-go
+description: Obfuscate customer MongoDB / Percona Server for MongoDB logs and FTDC diagnostic.data with mongodb-log-obfuscator-go before anyone, including the agent, reads or shares them, and check the result. Use as the first step before running mongodb-logstat or mongodb-ftdcstat on customer data; when the user has a support bundle, mongod/mongos logs or diagnostic.data to anonymize, obfuscate, sanitize or redact; needs consistent pseudonyms across nodes or batches; wants obfuscated output checked for leaked host names, IPs, users, namespaces or query values; asks about the obfuscator's output, mapping or exit status; or is changing the obfuscator's code. Not for analysing the logs (use mongodb-logstat and mongodb-ftdcstat on the obfuscated output) or for other databases.
 ---
 
-# mongodb-log-obfuscator
+# mongodb-log-obfuscator-go
 
 `mongodb-log-obfuscator-go` replaces host names, IPs, database, collection and
 user names and the personal data in query payloads of MongoDB logs and FTDC,
@@ -52,8 +52,13 @@ too.
    mongodb-log-obfuscator-go --verify --out CASE/obfuscated CASE/raw
    ```
 
-   Several inputs (files and directories) share one mapping:
+   Several inputs (files, directories, globs) share one mapping:
    `mongodb-log-obfuscator-go --verify --out CASE/obfuscated CASE/node1.log CASE/node2/diagnostic.data`.
+   Run all nodes of a cluster in **one** invocation (or chain runs with
+   `--load-mapping`, step 5): separate runs number names independently, so
+   `host1` in one output would not be `host1` in another.
+   `--dry-run` lists what would be processed and skipped without writing
+   anything, not even the mapping.
    Add `--keep-equality` when equal values must stay recognisable (hot keys,
    skewed filters, the same document updated repeatedly).
    When the incident window is known, add `--from`/`--to` (same formats as
@@ -97,6 +102,11 @@ too.
 - **Pipelines:** `$match` is redacted; other stages keep field references
   (`"$amount"`), numbers and `$lookup` field names; their collections are
   mapped.
+- **Safety net:** after the mapping, what still looks like a host name, IP,
+  email or customer path in text is replaced by `obfuscated-host`,
+  `192.0.2.1`, `obfuscated@example.com` or `/obfuscated/path` (system and
+  default MongoDB paths are kept). Seeing these means the name was not
+  discovered; the message around it is unchanged.
 - Counts, durations and plans are unchanged, so findings about load, slow
   shapes, elections and connection churn hold for the original.
 
@@ -109,3 +119,25 @@ names, plus mapping files inside the directory, with values masked
 (`j…(17 chars)`; mapped originals are named by their replacement). A clean
 result is evidence, not proof: a person's name in free text that was never
 discovered is not detected, and field names are kept by design.
+
+If the user gives known original identifiers (customer name, host names),
+search the obfuscated output for them with `grep -n -F` and report hits by
+file and line number only, without quoting the surrounding text. Then check
+that the output is still usable: `mongodb-logstat --report queries CASE/obfuscated`
+and `mongodb-ftdcstat CASE/obfuscated/<...>/diagnostic.data --view summary --avg 15m`.
+
+## Changing the tool
+
+Packages: `internal/inputs` (classification, skipped files, output paths),
+`internal/discover` (finding names in logs and BSON), `internal/registry`
+(categories, replacement forms, mapping), `internal/replace` (one-pass
+replacement), `internal/redact` (payload rules, command allowlist, text
+scrubbing, safety net, `--keep-equality`), `internal/processor` (pipeline,
+FTDC and log writers, aggregation pipelines), `internal/pipeline` (parallel
+blocks), `internal/logline` (prefixes, timestamps), `internal/timerange`,
+`internal/verify`, `internal/ftdc`. Validate with `go test ./...` and
+`go vet ./...`, build into a scratch path, and check that obfuscated samples
+still read in `mongodb-logstat` and `mongodb-ftdcstat` and pass `verify`. Add a
+test to `internal/processor/leaks_test.go` for every leak fixed. Update
+`README.md` and this skill (the Codex copy under `skills/.codex/` has the same
+body) when behaviour changes.

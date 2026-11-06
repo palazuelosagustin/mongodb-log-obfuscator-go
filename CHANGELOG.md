@@ -26,3 +26,7 @@ First versioned release.
 - `--jobs` workers process files and blocks of large files in parallel.
 - `--version`; the version is saved in the mapping.
 - `--from`/`--to`: keep only the log lines and FTDC chunks of a time window.
+- Safety net: host names, IPs, emails and customer paths the mapping missed
+  are replaced in text after the mapping.
+- Claude and Codex skills (`skills/.claude/mongodb-log-obfuscator-go`,
+  `skills/.codex/mongodb-log-obfuscator-go`).

@@ -155,16 +155,16 @@ var reHex = regexp.MustCompile(`^[0-9a-fA-F]{24,}$`)
 var reUUIDLike = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 var hostKeys = set("host", "hostAndPort", "hostName", "syncSource", "syncSourceHost", "syncSourceCandidate", "candidateNode", "candidate", "peer", "newSyncSource", "oldSyncSource", "previousSyncSource", "currentSyncSource", "unsupportedSyncSource", "syncTarget", "remoteHost", "senderHost", "donorHost", "addr", "address", "server", "serverAddress", "serverHost", "endpoint", "localEndpoint", "primary", "newPrimary", "targetPrimary", "node", "failedHost", "sniName", "me")
-var remoteLocalKeys = set("remote", "local", "remoteAddr", "remoteSocketAddress", "remoteString", "remoteAddress", "sourceClient")
+var remoteLocalKeys = set("remote", "local", "remoteAddr", "remoteSocketAddress", "remoteString", "remoteAddress", "sourceClient", "clientIP", "clientIp", "client", "ip")
 var namespaceKeys = set("ns", "namespace", "nss", "sourceNss", "targetNss", "newNss", "oldNss", "sourceNamespace", "targetNamespace", "destinationNamespace", "affectedNamespaces")
-var databaseKeys = set("database", "db", "dbName", "dbname", "$db", "authenticationDatabase")
-var collectionKeys = set("collection", "coll", "collName", "find", "aggregate", "insert", "update", "delete", "findAndModify")
+var databaseKeys = set("database", "db", "dbName", "dbname", "$db", "authenticationDatabase", "authdb")
+var collectionKeys = set("collection", "coll", "collName", "find", "aggregate", "insert", "update", "delete", "findAndModify", "count", "distinct", "create", "drop", "createIndexes", "dropIndexes", "collMod")
 var replsetKeys = set("replSetName", "setName", "replicaSet", "set")
-var userKeys = set("user", "userName", "queryUser", "principalName")
-var pathKeys = set("dbPath", "path", "filePath", "filepath", "configPath", "logPath", "file", "fileName", "dir", "directory")
+var userKeys = set("user", "userName", "queryUser", "principalName", "authenticatedUser")
+var pathKeys = set("dbPath", "path", "filePath", "filepath", "configPath", "logPath", "file", "fileName", "dir", "directory", "pidFilePath", "auditPath", "sslPEMKeyFile", "tlsCertificateKeyFile", "tlsCAFile", "sslCAFile", "keyFile", "executablePath")
 var connStringKeys = set("connString", "connectionString", "uri", "mongoUri", "ldapurl")
 var shardKeys = set("shard", "shardId", "fromShard", "toShard", "donorShardId", "recipientShardId")
-var appNameKeys = set("appName", "clientName")
+var appNameKeys = set("appName", "clientName", "serviceName", "processName")
 
 // X.509 subject and issuer names: replaced whole, they name the organisation,
 // unit, location and host.
@@ -338,6 +338,9 @@ func (s *Scanner) discoverNamespace(ns string) {
 }
 
 // notHosts are values that host fields hold when there is no host.
+// "client":"conn42" names a connection, not a host.
+var reConnectionContext = regexp.MustCompile(`^conn[0-9]+$`)
+
 var notHosts = set("unknown", "empty", "none", "null", "nil", "n/a", "localhost", "(none)", "self")
 
 func (s *Scanner) discoverHostValue(val string) {
@@ -348,7 +351,7 @@ func (s *Scanner) discoverHostValue(val string) {
 		}
 		return
 	}
-	if strings.ContainsAny(val, " \t") || has(notHosts, strings.ToLower(val)) {
+	if strings.ContainsAny(val, " \t") || has(notHosts, strings.ToLower(val)) || reConnectionContext.MatchString(val) {
 		return
 	}
 	host := val
@@ -479,29 +482,7 @@ func (s *Scanner) discoverKey(key string) {
 	}
 }
 
-// Top-level domains accepted for host names found in free text. Free text
-// also holds Java class names (java.util.concurrent.ThreadPoolExecutor),
-// versions (4.1.13.final) and build hosts; host fields are trusted as is.
-var hostTLDs = set("com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "biz", "info", "local", "internal", "corp", "lan", "intra", "intranet", "cloud", "app", "dev", "ai", "me", "tech", "online", "site", "xyz", "group", "bank", "finance", "insurance", "health", "global", "eu", "us", "uk", "de", "fr", "es", "it", "nl", "be", "ch", "at", "se", "no", "dk", "fi", "pl", "pt", "ie", "ca", "au", "nz", "jp", "cn", "in", "br", "mx", "ar", "cl", "za", "sg", "hk", "tw", "kr", "ru", "il", "ae", "sa", "tr", "id", "my", "th", "vn", "ph", "lu", "cz", "gr", "ro", "hu")
-
-// Public vendor domains that appear in build and version strings.
-var vendorDomains = []string{"redhat.com", "mongodb.com", "mongodb.org", "percona.com", "ubuntu.com", "debian.org", "centos.org", "fedoraproject.org", "github.com", "golang.org", "openssl.org"}
-
-func plausibleHostName(name string) bool {
-	if strings.ToLower(name) != name {
-		return false
-	}
-	labels := strings.Split(name, ".")
-	if !has(hostTLDs, labels[len(labels)-1]) {
-		return false
-	}
-	for _, d := range vendorDomains {
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return false
-		}
-	}
-	return true
-}
+func plausibleHostName(name string) bool { return redact.PlausibleHostName(name) }
 
 func (s *Scanner) discoverFreetextLight(text string) {
 	if reIP.MatchString(text) || reEmail.MatchString(text) || reFQDN.MatchString(text) || hasLDAPComponent(text) {

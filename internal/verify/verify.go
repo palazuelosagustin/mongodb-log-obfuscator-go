@@ -452,7 +452,7 @@ func publicIPv4(s string) bool {
 	switch {
 	case ip.IsPrivate(), ip.IsLoopback(), ip.IsLinkLocalUnicast(), ip.IsMulticast(), ip.IsUnspecified():
 		return false
-	case b[0] == 0 || b[0] >= 240 || (b[0] == 100 && b[1]&0xc0 == 64) || (b[0] == 198 && b[1]&0xfe == 18): // reserved, CGNAT, benchmark range used for replacements
+	case b[0] == 0 || b[0] >= 240 || (b[0] == 100 && b[1]&0xc0 == 64) || (b[0] == 198 && b[1]&0xfe == 18) || (b[0] == 192 && b[1] == 0 && b[2] == 2): // reserved, CGNAT, ranges used for replacements
 		return false
 	}
 	return true

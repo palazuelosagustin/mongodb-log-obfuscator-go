@@ -60,6 +60,9 @@ func (c *Collector) Register(category, value string) {
 	if category == "hostname" && len(value) < 4 {
 		return
 	}
+	if category == "data" && (value == "clientSupplied" || value == "majority") {
+		return // writeConcern provenance and level, not data
+	}
 	if c.Values[category] == nil {
 		c.Values[category] = map[string]struct{}{}
 	}
