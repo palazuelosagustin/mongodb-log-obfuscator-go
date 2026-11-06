@@ -20,9 +20,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ahocorasick"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -67,7 +69,7 @@ var keyCategories = map[string]bool{"hostname": true, "fqdn": true, "domain": tr
 
 // Placeholder vocabulary: originals that occur inside it are not searched,
 // or every replacement would match.
-const vocabulary = "obfuscated string obfuscated payload obfuscated-number example.com /obfuscated/path database collection host domain user replset shard app data_ Organization Location com.example.app.Class redacted"
+const vocabulary = "obf_ zone obfuscated string obfuscated payload obfuscated-number example.com /obfuscated/path database collection host domain user replset shard app data_ Organization Location com.example.app.Class redacted"
 
 var (
 	reEmail = regexp.MustCompile(`\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b`)
@@ -91,7 +93,7 @@ type original struct {
 type checker struct {
 	opts      Options
 	originals []original
-	ac        *matcher
+	ac        *ahocorasick.Matcher
 	report    Report
 	seen      map[string]bool
 }
@@ -110,6 +112,9 @@ func Dir(dir string, opts Options) (Report, error) {
 	}
 	sort.Strings(cats)
 	for _, cat := range cats {
+		if registry.Hidden(cat) || strings.HasPrefix(cat, "_") {
+			continue // building blocks of host names and IPs, not values
+		}
 		for orig, repl := range opts.Mapping[cat] {
 			if len(orig) < 3 || strings.Contains(vocabulary, orig) {
 				continue
@@ -118,7 +123,7 @@ func Dir(dir string, opts Options) (Report, error) {
 			patterns = append(patterns, orig)
 		}
 	}
-	c.ac = newMatcher(patterns)
+	c.ac = ahocorasick.New(patterns)
 
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -297,7 +302,7 @@ func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 	if s == "" {
 		return
 	}
-	c.ac.each(s, func(id, start, end int) {
+	c.ac.Each(s, func(id, start, end int) {
 		o := c.originals[id]
 		if o.token && !replace.TokenBoundary(s, start, end) {
 			return
@@ -363,7 +368,7 @@ func publicIPv4(s string) bool {
 	switch {
 	case ip.IsPrivate(), ip.IsLoopback(), ip.IsLinkLocalUnicast(), ip.IsMulticast(), ip.IsUnspecified():
 		return false
-	case b[0] == 0 || b[0] >= 240 || (b[0] == 100 && b[1]&0xc0 == 64): // reserved, CGNAT
+	case b[0] == 0 || b[0] >= 240 || (b[0] == 100 && b[1]&0xc0 == 64) || (b[0] == 198 && b[1]&0xfe == 18): // reserved, CGNAT, benchmark range used for replacements
 		return false
 	}
 	return true

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/processor"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/verify"
 )
@@ -134,7 +137,7 @@ func obfuscate(args []string) error {
 	fs := flag.NewFlagSet("obfuscate", flag.ExitOnError)
 	var out, outAlias, mapping, mappingAlias, loadMapping, profile string
 	var jobs int
-	var dryRun, logOnly, ftdcOnly, doVerify bool
+	var dryRun, logOnly, ftdcOnly, doVerify, keepEquality bool
 	fs.StringVar(&out, "out", "", "root directory for obfuscated output")
 	fs.StringVar(&outAlias, "o", "", "alias for --out")
 	fs.StringVar(&outAlias, "output-dir", "", "alias for --out")
@@ -147,6 +150,7 @@ func obfuscate(args []string) error {
 	fs.BoolVar(&logOnly, "log-only", false, "process only log files")
 	fs.BoolVar(&ftdcOnly, "ftdc-only", false, "process only FTDC files")
 	fs.BoolVar(&doVerify, "verify", false, "check the output for possible leaks after writing it")
+	fs.BoolVar(&keepEquality, "keep-equality", false, "replace redacted strings with keyed hashes so equal values stay equal")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -203,6 +207,20 @@ func obfuscate(args []string) error {
 		if err := reg.Load(loadMapping); err != nil {
 			return err
 		}
+	}
+	if keepEquality {
+		if reg.EqualityKey == "" {
+			key := make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				return err
+			}
+			reg.EqualityKey = hex.EncodeToString(key)
+		}
+		key, err := hex.DecodeString(reg.EqualityKey)
+		if err != nil {
+			return fmt.Errorf("equality key in mapping: %w", err)
+		}
+		redact.SetEqualityKey(key)
 	}
 	fmt.Fprintf(os.Stderr, "Input root:   %s\n", inputRoot)
 	fmt.Fprintf(os.Stderr, "Output root:  %s\n", outputRoot)
@@ -294,6 +312,7 @@ Flags:
   --log-only                    Process only log files
   --ftdc-only                   Process only FTDC files
   --verify                      Check the output for possible leaks (exit 3 if any)
+  --keep-equality               Redacted strings become keyed hashes (obf_...): equal values stay equal
 
   mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR
                                 Check an obfuscated directory; exit 3 on possible leaks

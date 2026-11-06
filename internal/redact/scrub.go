@@ -25,7 +25,7 @@ func ScrubText(s string) (string, int) {
 			inner = reDupKeyValue.ReplaceAllStringFunc(inner, func(kv string) string {
 				count++
 				sub := reDupKeyValue.FindStringSubmatch(kv)
-				return sub[1] + `: "` + StringPlaceholder + `"`
+				return sub[1] + `: "` + Token(strings.Trim(sub[2], `"`)) + `"`
 			})
 			return "dup key: {" + inner + "}"
 		})
