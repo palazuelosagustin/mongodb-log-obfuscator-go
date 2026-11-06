@@ -51,6 +51,7 @@ func runVerifyCommand(args []string) int {
 	var mapping, mappingAlias string
 	fs.StringVar(&mapping, "mapping", "", "mapping JSON written by the obfuscation")
 	fs.StringVar(&mappingAlias, "m", "", "alias for --mapping")
+	jobs := fs.Int("jobs", runtime.NumCPU(), "parallel worker count")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -58,7 +59,7 @@ func runVerifyCommand(args []string) int {
 		mapping = mappingAlias
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR")
+		fmt.Fprintln(os.Stderr, "usage: mongodb-log-obfuscator-go verify [--mapping FILE] [--jobs N] OUTPUT_DIR")
 		return 2
 	}
 	dir := fs.Arg(0)
@@ -77,7 +78,7 @@ func runVerifyCommand(args []string) int {
 		fmt.Fprintf(os.Stderr, "Warning: no mapping at %s; checking only emails, public IPs, card numbers and LDAP names\n", mapping)
 		mapping = ""
 	}
-	if err := runVerify(dir, mapping, reg); err != nil {
+	if err := runVerify(dir, mapping, reg, *jobs); err != nil {
 		if errors.Is(err, errLeaks) {
 			return exitLeaks
 		}
@@ -87,8 +88,8 @@ func runVerifyCommand(args []string) int {
 	return 0
 }
 
-func runVerify(dir, mappingPath string, reg *registry.Registry) error {
-	report, err := verify.Dir(dir, verify.Options{Mapping: reg.Report(), MappingPath: mappingPath})
+func runVerify(dir, mappingPath string, reg *registry.Registry, jobs int) error {
+	report, err := verify.Dir(dir, verify.Options{Mapping: reg.Report(), MappingPath: mappingPath, Jobs: jobs})
 	if err != nil {
 		return err
 	}
@@ -250,7 +251,7 @@ func obfuscate(args []string) error {
 	fmt.Fprintf(os.Stderr, "Done in %s.\n", time.Since(start).Round(time.Millisecond))
 	if doVerify {
 		fmt.Fprintln(os.Stderr)
-		if err := runVerify(outputRoot, mapping, reg); err != nil {
+		if err := runVerify(outputRoot, mapping, reg, jobs); err != nil {
 			return err
 		}
 	}
@@ -338,7 +339,8 @@ Flags:
   --out, -o, --output-dir DIR   Root directory for obfuscated output
   --mapping, -m FILE            Shared mapping JSON path
   --load-mapping FILE           Load an existing mapping JSON
-  --jobs N                      Parallel worker count
+  --jobs N                      Parallel workers (default: CPU count); large files are
+                                split into blocks of lines processed in parallel
   --profile DIR                 Write cpu.pprof and mem.pprof
   --dry-run                     Discover only; do not write output
   --log-only                    Process only log files
@@ -346,7 +348,7 @@ Flags:
   --verify                      Check the output for possible leaks (exit 3 if any)
   --keep-equality               Redacted strings become keyed hashes (obf_...): equal values stay equal
 
-  mongodb-log-obfuscator-go verify [--mapping FILE] OUTPUT_DIR
+  mongodb-log-obfuscator-go verify [--mapping FILE] [--jobs N] OUTPUT_DIR
                                 Check an obfuscated directory; exit 3 on possible leaks
 
 The mapping defaults to OUTPUT_DIR_mapping.json, next to the output directory

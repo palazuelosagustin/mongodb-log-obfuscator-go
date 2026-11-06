@@ -14,6 +14,7 @@ import (
 
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"go.mongodb.org/mongo-driver/bson"
@@ -30,8 +31,9 @@ type Scanner struct {
 	warnings []string
 }
 
-func LogFile(path string, gz bool) (Result, error) {
-	s := &Scanner{c: registry.NewCollector()}
+// LogFile discovers the names in a log file, in parallel blocks of lines
+// when pool is not nil.
+func LogFile(path string, gz bool, pool ...*pipeline.Pool) (Result, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, err
@@ -46,22 +48,34 @@ func LogFile(path string, gz bool) (Result, error) {
 		defer zr.Close()
 		src = zr
 	}
-	r := bufio.NewReaderSize(src, 1024*1024)
-	count := 0
-	for {
-		line, err := r.ReadBytes('\n')
-		if len(line) > 0 {
+	p := (*pipeline.Pool)(nil)
+	if len(pool) > 0 {
+		p = pool[0]
+	}
+	if p == nil {
+		p = pipeline.NewPool(1)
+		defer p.Close()
+	}
+	total := Result{Collector: registry.NewCollector()}
+	err = pipeline.Lines(p, src, func(block []byte, _ int) (Result, error) {
+		s := &Scanner{c: registry.NewCollector()}
+		count := 0
+		pipeline.EachLine(block, func(line []byte) error {
 			count++
 			s.discoverLogLine(bytes.TrimSpace(line))
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return Result{}, err
-		}
+			return nil
+		})
+		return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
+	}, func(r Result) error {
+		total.Collector.Merge(r.Collector)
+		total.Count += r.Count
+		total.Warnings = append(total.Warnings, r.Warnings...)
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
 	}
-	return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
+	return total, nil
 }
 
 func FTDCFile(path string) (Result, error) {

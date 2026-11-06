@@ -25,7 +25,9 @@ Useful flags:
 - `--mapping`, `-m`: mapping JSON path. Defaults to `<out>_mapping.json`, next to
   the output directory. A path inside the output directory is rejected.
 - `--load-mapping`: seed replacements from an existing mapping.
-- `--jobs`: parallel worker count.
+- `--jobs`: parallel workers (default: the CPU count). Files are processed in
+  parallel, and large logs are split into blocks of lines processed in
+  parallel and written in order, so one large log also uses every worker.
 - `--profile`: directory for `cpu.pprof` and `mem.pprof`.
 - `--dry-run`: discover and summarize without writing output.
 - `--log-only`, `--ftdc-only`: restrict input types.
@@ -45,7 +47,10 @@ Files are recognised by content, not by name:
   of a running mongod) keeps its complete documents, with a warning. FTDC
   documents that cannot be decoded are dropped with a warning, never copied.
 - gzip-compressed logs (`mongod.log.1.gz`, `mongod.log-20261104.gz`): read
-  compressed and written compressed (`mongod.log.1_obfuscated.gz`).
+  compressed and written compressed (`mongod.log.1_obfuscated.gz`), one gzip
+  member per block of lines so compression runs in parallel; `gzip -d`,
+  `zcat` and Go/Python readers read it as one stream. Decompressing a gzip
+  file uses one core, which bounds the speed on very large compressed logs.
 - any other text file (logs, `mongod.conf`, command output): obfuscated as
   text, JSON log lines as JSON.
 

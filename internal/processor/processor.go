@@ -19,6 +19,7 @@ import (
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
@@ -83,8 +84,12 @@ func Run(cfg Config) (Summary, error) {
 	}
 	sort.Slice(cfg.Files, func(i, j int) bool { return cfg.Files[i].Path < cfg.Files[j].Path })
 	summary := Summary{}
+	// One pool of --jobs workers for all files: many small files and one
+	// large file both use every worker.
+	pool := pipeline.NewPool(cfg.Jobs)
+	defer pool.Close()
 	start := time.Now()
-	results := discoverAll(cfg.Files, cfg.Jobs)
+	results := discoverAll(cfg.Files, cfg.Jobs, pool)
 	summary.DiscoverTime = time.Since(start)
 	var files []inputs.File
 	var collectors []*registry.Collector
@@ -124,7 +129,7 @@ func Run(cfg Config) (Summary, error) {
 		outPaths[i] = OutputPath(f, cfg.InputRoot, cfg.OutputRoot, names)
 	}
 	start = time.Now()
-	for _, r := range replaceAll(files, outPaths, cfg.Jobs, matcher) {
+	for _, r := range replaceAll(files, outPaths, cfg.Jobs, pool, matcher) {
 		summary.PayloadRedactions += r.redactions
 		for _, w := range r.warnings {
 			if !alreadyWarned(summary.Warnings, r.file.Path, w) {
@@ -160,7 +165,7 @@ func alreadyWarned(warnings []FileMessage, path, msg string) bool {
 	return false
 }
 
-func discoverAll(files []inputs.File, jobs int) []fileResult {
+func discoverAll(files []inputs.File, jobs int, pool *pipeline.Pool) []fileResult {
 	type job struct {
 		index int
 		file  inputs.File
@@ -176,9 +181,9 @@ func discoverAll(files []inputs.File, jobs int) []fileResult {
 				var r discover.Result
 				var err error
 				if j.file.Type == inputs.Log {
-					r, err = discover.LogFile(j.file.Path, j.file.Gzip)
+					r, err = discover.LogFile(j.file.Path, j.file.Gzip, pool)
 				} else {
-					r, err = discover.FTDCFile(j.file.Path)
+					pool.Do(func() { r, err = discover.FTDCFile(j.file.Path) })
 				}
 				results[j.index] = fileResult{file: j.file, result: r, err: err}
 			}
@@ -202,7 +207,7 @@ type replaceResult struct {
 
 // replaceAll writes every output; a file that fails has its partial output
 // removed and does not stop the others.
-func replaceAll(files []inputs.File, outPaths []string, jobs int, matcher *obfuscator) []replaceResult {
+func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline.Pool, matcher *obfuscator) []replaceResult {
 	jobsCh := make(chan int)
 	results := make([]replaceResult, len(files))
 	var wg sync.WaitGroup
@@ -216,9 +221,9 @@ func replaceAll(files []inputs.File, outPaths []string, jobs int, matcher *obfus
 				if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 					res.err = err
 				} else if f.Type == inputs.Log {
-					res.redactions, res.err = replaceLog(f.Path, out, f.Gzip, matcher)
+					res.redactions, res.err = replaceLog(f.Path, out, f.Gzip, pool, matcher)
 				} else {
-					res.redactions, res.warnings, res.err = replaceFTDC(f.Path, out, matcher)
+					pool.Do(func() { res.redactions, res.warnings, res.err = replaceFTDC(f.Path, out, matcher) })
 				}
 				if res.err != nil {
 					os.Remove(out)
@@ -235,7 +240,11 @@ func replaceAll(files []inputs.File, outPaths []string, jobs int, matcher *obfus
 	return results
 }
 
-func replaceLog(inPath, outPath string, gz bool, matcher *obfuscator) (total int, err error) {
+// replaceLog obfuscates a log in parallel blocks of lines, written in input
+// order. A compressed log is written compressed, one gzip member per block
+// (gzip readers read concatenated members as one stream), so compression
+// runs in parallel too.
+func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *obfuscator) (total int, err error) {
 	in, err := os.Open(inPath)
 	if err != nil {
 		return 0, err
@@ -259,42 +268,48 @@ func replaceLog(inPath, outPath string, gz bool, matcher *obfuscator) (total int
 			err = cerr
 		}
 	}()
-	var dst io.Writer = out
-	var zw *gzip.Writer
-	if gz {
-		zw, _ = gzip.NewWriterLevel(out, gzip.BestSpeed)
-		dst = zw
+	w := bufio.NewWriterSize(out, 1<<20)
+	type block struct {
+		data []byte
+		n    int
 	}
-	r := bufio.NewReaderSize(src, 1<<20)
-	w := bufio.NewWriterSize(dst, 1<<20)
-	for {
-		line, rerr := r.ReadString('\n')
-		if line != "" {
-			repl, n, e := matcher.logLine(line)
-			if e != nil {
-				return total, e
+	err = pipeline.Lines(pool, src, func(in []byte, _ int) (block, error) {
+		var buf bytes.Buffer
+		buf.Grow(len(in) + len(in)/8)
+		var dst io.Writer = &buf
+		var zw *gzip.Writer
+		if gz {
+			zw, _ = gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+			dst = zw
+		}
+		n := 0
+		err := pipeline.EachLine(in, func(line []byte) error {
+			repl, c, err := matcher.logLine(string(line))
+			if err != nil {
+				return err
 			}
-			total += n
-			if _, e := w.WriteString(repl); e != nil {
-				return total, e
+			n += c
+			_, err = io.WriteString(dst, repl)
+			return err
+		})
+		if err != nil {
+			return block{}, err
+		}
+		if zw != nil {
+			if err := zw.Close(); err != nil {
+				return block{}, err
 			}
 		}
-		if rerr != nil {
-			if !errors.Is(rerr, io.EOF) {
-				return total, rerr
-			}
-			break
-		}
-	}
-	if err := w.Flush(); err != nil {
+		return block{buf.Bytes(), n}, nil
+	}, func(b block) error {
+		total += b.n
+		_, err := w.Write(b.data)
+		return err
+	})
+	if err != nil {
 		return total, err
 	}
-	if zw != nil {
-		if err := zw.Close(); err != nil {
-			return total, err
-		}
-	}
-	return total, nil
+	return total, w.Flush()
 }
 
 // replaceFTDC streams an FTDC file document by document. Documents that
