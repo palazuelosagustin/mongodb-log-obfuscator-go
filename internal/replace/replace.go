@@ -5,8 +5,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ahocorasick"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ahocorasick"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
 )
 
 // Matcher replaces every mapped original in one left-to-right pass: at each

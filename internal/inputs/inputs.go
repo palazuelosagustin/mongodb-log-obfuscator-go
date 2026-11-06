@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"fmt"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ftdc"
 	"os"
 	"path/filepath"
 	"sort"

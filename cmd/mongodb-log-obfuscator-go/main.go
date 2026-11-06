@@ -13,11 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/processor"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/verify"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/processor"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/timerange"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/verify"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/version"
 )
 
 // exitLeaks is the exit status when --verify or verify finds possible leaks.
@@ -26,6 +28,10 @@ const exitLeaks = 3
 var errLeaks = errors.New("verify found possible leaks")
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version" || os.Args[1] == "version") {
+		fmt.Println(version.Long("mongodb-log-obfuscator-go"))
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "verify" {
 		os.Exit(runVerifyCommand(os.Args[2:]))
 	}
@@ -139,6 +145,7 @@ func obfuscate(args []string) error {
 	var out, outAlias, mapping, mappingAlias, loadMapping, profile string
 	var jobs int
 	var dryRun, logOnly, ftdcOnly, doVerify, keepEquality bool
+	var fromArg, toArg string
 	fs.StringVar(&out, "out", "", "root directory for obfuscated output")
 	fs.StringVar(&outAlias, "o", "", "alias for --out")
 	fs.StringVar(&outAlias, "output-dir", "", "alias for --out")
@@ -151,6 +158,8 @@ func obfuscate(args []string) error {
 	fs.BoolVar(&logOnly, "log-only", false, "process only log files")
 	fs.BoolVar(&ftdcOnly, "ftdc-only", false, "process only FTDC files")
 	fs.BoolVar(&doVerify, "verify", false, "check the output for possible leaks after writing it")
+	fs.StringVar(&fromArg, "from", "", "keep log lines and FTDC data from this time (inclusive): RFC3339, or UTC without zone")
+	fs.StringVar(&toArg, "to", "", "keep log lines and FTDC data before this time (exclusive): RFC3339, or UTC without zone")
 	fs.BoolVar(&keepEquality, "keep-equality", false, "replace redacted strings with keyed hashes so equal values stay equal")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -163,6 +172,21 @@ func obfuscate(args []string) error {
 	}
 	if logOnly && ftdcOnly {
 		return fmt.Errorf("--log-only and --ftdc-only are mutually exclusive")
+	}
+	var rng timerange.Range
+	var err error
+	if fromArg != "" {
+		if rng.From, err = timerange.Parse(fromArg); err != nil {
+			return fmt.Errorf("--from %v", err)
+		}
+	}
+	if toArg != "" {
+		if rng.To, err = timerange.Parse(toArg); err != nil {
+			return fmt.Errorf("--to %v", err)
+		}
+	}
+	if !rng.From.IsZero() && !rng.To.IsZero() && !rng.From.Before(rng.To) {
+		return fmt.Errorf("--from must be before --to")
 	}
 	inputArgs := fs.Args()
 	if len(inputArgs) == 0 {
@@ -224,14 +248,19 @@ func obfuscate(args []string) error {
 		}
 		redact.SetEqualityKey(key)
 	}
+	reg.ToolVersion = version.String()
+	fmt.Fprintf(os.Stderr, "%s\n", version.Long("mongodb-log-obfuscator-go"))
 	fmt.Fprintf(os.Stderr, "Input root:   %s\n", inputRoot)
 	fmt.Fprintf(os.Stderr, "Output root:  %s\n", outputRoot)
 	fmt.Fprintf(os.Stderr, "Mapping file: %s\n", mapping)
+	if rng.Set() {
+		fmt.Fprintf(os.Stderr, "Time range:   %s to %s\n", rangeBound(rng.From, "start"), rangeBound(rng.To, "end"))
+	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "Found %d file(s)\n", len(files))
 	printMessages("Skipped", skippedMessages(skipped), inputRoot)
 	start := time.Now()
-	summary, err := processor.Run(processor.Config{Files: files, InputRoot: inputRoot, OutputRoot: outputRoot, MappingPath: mapping, Jobs: jobs, DryRun: dryRun, Registry: reg})
+	summary, err := processor.Run(processor.Config{Files: files, InputRoot: inputRoot, OutputRoot: outputRoot, MappingPath: mapping, Jobs: jobs, DryRun: dryRun, Registry: reg, Range: rng})
 	if err != nil {
 		return err
 	}
@@ -244,6 +273,14 @@ func obfuscate(args []string) error {
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "Wrote %d file(s) in %s\n", summary.Files, summary.ReplaceTime.Round(time.Millisecond))
+	if rng.Set() {
+		fmt.Fprintf(os.Stderr, "Outside the time range (not written): %d log line(s), %d FTDC chunk(s)\n", summary.OutOfRangeLines, summary.OutOfRangeChunks)
+		nothing := make([]processor.FileMessage, len(summary.NothingInRange))
+		for i, p := range summary.NothingInRange {
+			nothing[i] = processor.FileMessage{Path: p, Message: "nothing in the time range"}
+		}
+		printMessages("Not written", nothing, inputRoot)
+	}
 	if len(summary.Outputs) == 1 {
 		fmt.Fprintf(os.Stderr, "Obfuscated file: %s\n", summary.Outputs[0])
 	}
@@ -259,6 +296,13 @@ func obfuscate(args []string) error {
 		return fmt.Errorf("%d file(s) could not be obfuscated and were not written (listed above)", len(summary.Failures))
 	}
 	return nil
+}
+
+func rangeBound(t time.Time, open string) string {
+	if t.IsZero() {
+		return open
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 func skippedMessages(skipped []inputs.Skipped) []processor.FileMessage {
@@ -332,8 +376,12 @@ func startProfile(dir string) (func(), error) {
 	}, nil
 }
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
+	fmt.Fprint(os.Stderr, usageText)
+}
+
+const usageText = `Usage:
   mongodb-log-obfuscator-go [obfuscate] [flags] INPUT...
+  mongodb-log-obfuscator-go --version
 
 Flags:
   --out, -o, --output-dir DIR   Root directory for obfuscated output
@@ -343,6 +391,8 @@ Flags:
                                 split into blocks of lines processed in parallel
   --profile DIR                 Write cpu.pprof and mem.pprof
   --dry-run                     Discover only; do not write output
+  --from TIME, --to TIME        Keep only log lines and FTDC data in [from, to): RFC3339
+                                (2026-11-04T13:30:00Z) or UTC without zone (2026-11-04T13:30)
   --log-only                    Process only log files
   --ftdc-only                   Process only FTDC files
   --verify                      Check the output for possible leaks (exit 3 if any)
@@ -353,5 +403,4 @@ Flags:
 
 The mapping defaults to OUTPUT_DIR_mapping.json, next to the output directory
 and never inside it: it reverses the obfuscation.
-`)
-}
+`

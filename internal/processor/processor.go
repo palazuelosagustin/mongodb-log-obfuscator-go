@@ -15,14 +15,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/discover"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/inputs"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/discover"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/inputs"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/pipeline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/replace"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/timerange"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -35,6 +36,8 @@ type Config struct {
 	Jobs        int
 	DryRun      bool
 	Registry    *registry.Registry
+	// Range keeps only log lines and FTDC chunks inside --from/--to.
+	Range timerange.Range
 }
 type Summary struct {
 	Files             int
@@ -50,6 +53,11 @@ type Summary struct {
 	// problem (truncated FTDC, dropped documents).
 	Failures []FileMessage
 	Warnings []FileMessage
+	// With --from/--to: log lines and FTDC chunks left out, and files with
+	// nothing in the range (not written).
+	OutOfRangeLines  int
+	OutOfRangeChunks int
+	NothingInRange   []string
 }
 
 type FileMessage struct {
@@ -89,7 +97,7 @@ func Run(cfg Config) (Summary, error) {
 	pool := pipeline.NewPool(cfg.Jobs)
 	defer pool.Close()
 	start := time.Now()
-	results := discoverAll(cfg.Files, cfg.Jobs, pool)
+	results := discoverAll(cfg.Files, cfg.Jobs, pool, cfg.Range)
 	summary.DiscoverTime = time.Since(start)
 	var files []inputs.File
 	var collectors []*registry.Collector
@@ -129,7 +137,7 @@ func Run(cfg Config) (Summary, error) {
 		outPaths[i] = OutputPath(f, cfg.InputRoot, cfg.OutputRoot, names)
 	}
 	start = time.Now()
-	for _, r := range replaceAll(files, outPaths, cfg.Jobs, pool, matcher) {
+	for _, r := range replaceAll(files, outPaths, cfg.Jobs, pool, matcher, cfg.Range) {
 		summary.PayloadRedactions += r.redactions
 		for _, w := range r.warnings {
 			if !alreadyWarned(summary.Warnings, r.file.Path, w) {
@@ -138,6 +146,13 @@ func Run(cfg Config) (Summary, error) {
 		}
 		if r.err != nil {
 			summary.Failures = append(summary.Failures, FileMessage{Path: r.file.Path, Message: r.err.Error()})
+			continue
+		}
+		summary.OutOfRangeLines += r.outOfRangeLines
+		summary.OutOfRangeChunks += r.outOfRangeChunks
+		if cfg.Range.Set() && r.kept == 0 {
+			os.Remove(r.out)
+			summary.NothingInRange = append(summary.NothingInRange, r.file.Path)
 			continue
 		}
 		summary.Files++
@@ -165,7 +180,7 @@ func alreadyWarned(warnings []FileMessage, path, msg string) bool {
 	return false
 }
 
-func discoverAll(files []inputs.File, jobs int, pool *pipeline.Pool) []fileResult {
+func discoverAll(files []inputs.File, jobs int, pool *pipeline.Pool, rng timerange.Range) []fileResult {
 	type job struct {
 		index int
 		file  inputs.File
@@ -181,7 +196,7 @@ func discoverAll(files []inputs.File, jobs int, pool *pipeline.Pool) []fileResul
 				var r discover.Result
 				var err error
 				if j.file.Type == inputs.Log {
-					r, err = discover.LogFile(j.file.Path, j.file.Gzip, pool)
+					r, err = discover.LogFile(j.file.Path, discover.LogOptions{Gzip: j.file.Gzip, Pool: pool, Range: rng})
 				} else {
 					pool.Do(func() { r, err = discover.FTDCFile(j.file.Path) })
 				}
@@ -203,11 +218,16 @@ type replaceResult struct {
 	redactions int
 	warnings   []string
 	err        error
+	// kept counts the lines or FTDC documents written; outOfRange* those
+	// left out by --from/--to.
+	kept             int
+	outOfRangeLines  int
+	outOfRangeChunks int
 }
 
 // replaceAll writes every output; a file that fails has its partial output
 // removed and does not stop the others.
-func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline.Pool, matcher *obfuscator) []replaceResult {
+func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline.Pool, matcher *obfuscator, rng timerange.Range) []replaceResult {
 	jobsCh := make(chan int)
 	results := make([]replaceResult, len(files))
 	var wg sync.WaitGroup
@@ -221,9 +241,9 @@ func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline
 				if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 					res.err = err
 				} else if f.Type == inputs.Log {
-					res.redactions, res.err = replaceLog(f.Path, out, f.Gzip, pool, matcher)
+					res.err = replaceLog(f.Path, out, f.Gzip, pool, matcher, rng, &res)
 				} else {
-					pool.Do(func() { res.redactions, res.warnings, res.err = replaceFTDC(f.Path, out, matcher) })
+					pool.Do(func() { res.err = replaceFTDC(f.Path, out, matcher, rng, &res) })
 				}
 				if res.err != nil {
 					os.Remove(out)
@@ -244,24 +264,24 @@ func replaceAll(files []inputs.File, outPaths []string, jobs int, pool *pipeline
 // order. A compressed log is written compressed, one gzip member per block
 // (gzip readers read concatenated members as one stream), so compression
 // runs in parallel too.
-func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *obfuscator) (total int, err error) {
+func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *obfuscator, rng timerange.Range, res *replaceResult) (err error) {
 	in, err := os.Open(inPath)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer in.Close()
 	var src io.Reader = in
 	if gz {
 		zr, err := gzip.NewReader(bufio.NewReaderSize(in, 1<<20))
 		if err != nil {
-			return 0, err
+			return err
 		}
 		defer zr.Close()
 		src = zr
 	}
 	out, err := os.Create(outPath)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer func() {
 		if cerr := out.Close(); err == nil {
@@ -270,8 +290,9 @@ func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *o
 	}()
 	w := bufio.NewWriterSize(out, 1<<20)
 	type block struct {
-		data []byte
-		n    int
+		data      []byte
+		n         int
+		kept, out int
 	}
 	err = pipeline.Lines(pool, src, func(in []byte, _ int) (block, error) {
 		var buf bytes.Buffer
@@ -282,13 +303,18 @@ func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *o
 			zw, _ = gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
 			dst = zw
 		}
-		n := 0
+		var b block
 		err := pipeline.EachLine(in, func(line []byte) error {
+			if !logline.Keep(line, rng) {
+				b.out++
+				return nil
+			}
+			b.kept++
 			repl, c, err := matcher.logLine(string(line))
 			if err != nil {
 				return err
 			}
-			n += c
+			b.n += c
 			_, err = io.WriteString(dst, repl)
 			return err
 		})
@@ -300,31 +326,39 @@ func replaceLog(inPath, outPath string, gz bool, pool *pipeline.Pool, matcher *o
 				return block{}, err
 			}
 		}
-		return block{buf.Bytes(), n}, nil
+		b.data = buf.Bytes()
+		return b, nil
 	}, func(b block) error {
-		total += b.n
+		res.redactions += b.n
+		res.kept += b.kept
+		res.outOfRangeLines += b.out
 		_, err := w.Write(b.data)
 		return err
 	})
 	if err != nil {
-		return total, err
+		return err
 	}
-	return total, w.Flush()
+	return w.Flush()
 }
 
 // replaceFTDC streams an FTDC file document by document. Documents that
 // cannot be decoded and obfuscated are dropped with a warning rather than
 // copied: they may hold names. A file that ends inside a document (the
 // metrics.interim of a running mongod) keeps its complete documents.
-func replaceFTDC(inPath, outPath string, matcher *obfuscator) (total int, warnings []string, err error) {
+//
+// With --from/--to, a metric chunk is kept when the time it covers, from its
+// _id to the next chunk's _id, meets the range (the last chunk is assumed to
+// cover as long as the one before it). Metadata documents are written only
+// before a kept chunk, periodic metadata only inside the range.
+func replaceFTDC(inPath, outPath string, matcher *obfuscator, rng timerange.Range, res *replaceResult) (err error) {
 	in, err := os.Open(inPath)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
 	defer in.Close()
 	out, err := os.Create(outPath)
 	if err != nil {
-		return 0, nil, err
+		return err
 	}
 	defer func() {
 		if cerr := out.Close(); err == nil {
@@ -333,6 +367,35 @@ func replaceFTDC(inPath, outPath string, matcher *obfuscator) (total int, warnin
 	}()
 	w := bufio.NewWriterSize(out, 1<<20)
 	rd := ftdc.NewReader(bufio.NewReaderSize(in, 1<<20))
+	var metadata [][]byte // waiting for a kept chunk
+	write := func(enc []byte) error {
+		for _, m := range metadata {
+			if _, err := w.Write(m); err != nil {
+				return err
+			}
+			res.kept++
+		}
+		metadata = nil
+		res.kept++
+		_, err := w.Write(enc)
+		return err
+	}
+	var pending []byte
+	var pendingStart time.Time
+	span := 5 * time.Minute
+	decide := func(end time.Time) error {
+		if pending == nil {
+			return nil
+		}
+		keep := rng.Overlaps(pendingStart, end)
+		enc := pending
+		pending = nil
+		if !keep {
+			res.outOfRangeChunks++
+			return nil
+		}
+		return write(enc)
+	}
 	dropped := 0
 	for {
 		raw, rerr := rd.Next()
@@ -341,29 +404,55 @@ func replaceFTDC(inPath, outPath string, matcher *obfuscator) (total int, warnin
 		}
 		if rerr != nil {
 			if errors.Is(rerr, ftdc.ErrTruncated) {
-				warnings = append(warnings, rerr.Error()+"; the incomplete document is dropped")
+				res.warnings = append(res.warnings, rerr.Error()+"; the incomplete document is dropped")
 				break
 			}
-			return total, warnings, rerr
+			return rerr
 		}
 		doc, n, ok := obfuscateFTDCDocument(raw.Doc, matcher)
-		total += n
+		res.redactions += n
 		if !ok {
 			dropped++
 			continue
 		}
 		enc, err := bson.Marshal(doc)
 		if err != nil {
-			return total, warnings, err
+			return err
 		}
-		if _, err := w.Write(enc); err != nil {
-			return total, warnings, err
+		if !rng.Set() {
+			if err := write(enc); err != nil {
+				return err
+			}
+			continue
 		}
+		typ, _ := ftdc.Type(doc)
+		id, hasID := ftdc.ID(doc)
+		switch {
+		case typ == ftdc.TypeMetadata:
+			metadata = append(metadata, enc)
+		case typ == ftdc.TypeMetricChunk && hasID:
+			if pending != nil && id.After(pendingStart) {
+				span = id.Sub(pendingStart)
+			}
+			if err := decide(id); err != nil {
+				return err
+			}
+			pending, pendingStart = enc, id
+		case hasID && rng.Contains(id):
+			if err := write(enc); err != nil {
+				return err
+			}
+		default:
+			res.outOfRangeChunks++
+		}
+	}
+	if err := decide(pendingStart.Add(span)); err != nil {
+		return err
 	}
 	if dropped > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d FTDC document(s) could not be decoded and were dropped", dropped))
+		res.warnings = append(res.warnings, fmt.Sprintf("%d FTDC document(s) could not be decoded and were dropped", dropped))
 	}
-	return total, warnings, w.Flush()
+	return w.Flush()
 }
 
 // obfuscateFTDCDocument returns the obfuscated document, or ok=false when it

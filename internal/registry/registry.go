@@ -22,6 +22,8 @@ type Registry struct {
 	// EqualityKey (hex) keys the hashes of --keep-equality; saved in the
 	// mapping so later runs hash the same values the same way.
 	EqualityKey string
+	// ToolVersion is the obfuscator version, saved in the mapping.
+	ToolVersion string
 }
 
 const equalitySection = "_equality"
@@ -346,6 +348,9 @@ func (r *Registry) Report() map[string]map[string]string {
 	out := map[string]map[string]string{}
 	if r.EqualityKey != "" {
 		out[equalitySection] = map[string]string{"key": r.EqualityKey}
+	}
+	if r.ToolVersion != "" {
+		out["_meta"] = map[string]string{"toolVersion": r.ToolVersion}
 	}
 	for _, cat := range categories {
 		if len(r.Categories[cat]) == 0 {

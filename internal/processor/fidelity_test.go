@@ -6,10 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/discover"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/replace"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/discover"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/replace"
 )
 
 // obfuscateLines runs discovery and replacement over lines, as Run does.
@@ -19,7 +19,7 @@ func obfuscateLines(t *testing.T, lines ...string) ([]string, *registry.Registry
 	if err := writeFile(path, strings.Join(lines, "\n")+"\n"); err != nil {
 		t.Fatal(err)
 	}
-	res, err := discover.LogFile(path, false)
+	res, err := discover.LogFile(path, discover.LogOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

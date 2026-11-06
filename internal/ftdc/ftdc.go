@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -123,6 +124,20 @@ func Type(doc bson.D) (int32, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ID returns the "_id" date of an FTDC document: the time of the first sample
+// of a metric chunk, or of a metadata document.
+func ID(doc bson.D) (time.Time, bool) {
+	for _, elem := range doc {
+		if elem.Key == "_id" {
+			if d, ok := elem.Value.(primitive.DateTime); ok {
+				return d.Time(), true
+			}
+			return time.Time{}, false
+		}
+	}
+	return time.Time{}, false
 }
 
 func BinaryField(doc bson.D, key string) (primitive.Binary, bool) {

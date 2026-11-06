@@ -12,18 +12,29 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ftdc"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/logline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/pipeline"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/redact"
-	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/ftdc"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/logline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/pipeline"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/redact"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/registry"
+	"github.com/palazuelosagustin/mongodb-log-obfuscator-go/internal/timerange"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
 type Result struct {
 	Collector *registry.Collector
 	Count     int
-	Warnings  []string
+	// OutOfRange counts log lines outside LogOptions.Range.
+	OutOfRange int
+	Warnings   []string
+}
+
+type LogOptions struct {
+	Gzip bool
+	// Pool processes blocks of lines in parallel; nil uses one worker.
+	Pool *pipeline.Pool
+	// Range limits discovery to lines inside --from/--to.
+	Range timerange.Range
 }
 
 type Scanner struct {
@@ -31,16 +42,15 @@ type Scanner struct {
 	warnings []string
 }
 
-// LogFile discovers the names in a log file, in parallel blocks of lines
-// when pool is not nil.
-func LogFile(path string, gz bool, pool ...*pipeline.Pool) (Result, error) {
+// LogFile discovers the names in a log file.
+func LogFile(path string, opts LogOptions) (Result, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Result{}, err
 	}
 	defer f.Close()
 	var src io.Reader = f
-	if gz {
+	if opts.Gzip {
 		zr, err := gzip.NewReader(bufio.NewReaderSize(f, 1<<20))
 		if err != nil {
 			return Result{}, err
@@ -48,10 +58,7 @@ func LogFile(path string, gz bool, pool ...*pipeline.Pool) (Result, error) {
 		defer zr.Close()
 		src = zr
 	}
-	p := (*pipeline.Pool)(nil)
-	if len(pool) > 0 {
-		p = pool[0]
-	}
+	p := opts.Pool
 	if p == nil {
 		p = pipeline.NewPool(1)
 		defer p.Close()
@@ -59,16 +66,21 @@ func LogFile(path string, gz bool, pool ...*pipeline.Pool) (Result, error) {
 	total := Result{Collector: registry.NewCollector()}
 	err = pipeline.Lines(p, src, func(block []byte, _ int) (Result, error) {
 		s := &Scanner{c: registry.NewCollector()}
-		count := 0
+		count, out := 0, 0
 		pipeline.EachLine(block, func(line []byte) error {
+			if !logline.Keep(line, opts.Range) {
+				out++
+				return nil
+			}
 			count++
 			s.discoverLogLine(bytes.TrimSpace(line))
 			return nil
 		})
-		return Result{Collector: s.c, Count: count, Warnings: s.warnings}, nil
+		return Result{Collector: s.c, Count: count, OutOfRange: out, Warnings: s.warnings}, nil
 	}, func(r Result) error {
 		total.Collector.Merge(r.Collector)
 		total.Count += r.Count
+		total.OutOfRange += r.OutOfRange
 		total.Warnings = append(total.Warnings, r.Warnings...)
 		return nil
 	})
