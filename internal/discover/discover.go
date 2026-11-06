@@ -187,7 +187,7 @@ func (s *Scanner) discoverValue(key string, val any) {
 			s.register("database", text)
 		}
 	case has(collectionKeys, key):
-		if !strings.HasPrefix(text, "system.") && !strings.HasPrefix(text, "$") {
+		if !internalCollection(text) {
 			s.register("collection", text)
 		}
 	case has(namespaceKeys, key):
@@ -198,7 +198,7 @@ func (s *Scanner) discoverValue(key string, val any) {
 			if parts := strings.SplitN(text, "@", 2); len(parts) == 2 {
 				s.register("domain", parts[1])
 			}
-		} else {
+		} else if !has(internalUsers, text) {
 			s.register("user", text)
 		}
 	case has(pathKeys, key):
@@ -210,7 +210,9 @@ func (s *Scanner) discoverValue(key string, val any) {
 	case has(connStringKeys, key):
 		s.discoverConnString(text)
 	case has(appNameKeys, key):
-		s.register("appname", text)
+		if !toolAppName(text) {
+			s.register("appname", text)
+		}
 	case has(hostListKeys, key):
 		for _, part := range splitListish(text) {
 			s.discoverHostValue(part)
@@ -222,6 +224,41 @@ func (s *Scanner) discoverValue(key string, val any) {
 		s.discoverFreetextLight(text)
 	}
 }
+
+// categorizedKey reports keys whose values have a known category.
+func categorizedKey(key string) bool {
+	for _, keys := range []map[string]struct{}{replsetKeys, shardKeys, databaseKeys, collectionKeys, namespaceKeys, userKeys, pathKeys, hostKeys, remoteLocalKeys, connStringKeys, appNameKeys, hostListKeys, certSubjectKeys} {
+		if has(keys, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// Collections created by MongoDB itself and by Percona Backup for MongoDB
+// keep their names: they say what the server or the backup tool was doing.
+var internalCollections = set("oplog.rs", "transactions", "image_collection", "startup_log", "me", "replset.election", "replset.minvalid", "replset.oplogTruncateAfterPoint", "replset.initialSyncId", "chunks", "collections", "databases", "shards", "mongos", "locks", "lockpings", "settings", "version", "tags", "changelog", "actionlog", "migrations", "migrationCoordinators", "rangeDeletions", "reshardingOperations", "tenantMigrationDonors", "tenantMigrationRecipients", "clusterParameters", "placementHistory", "queryAnalyzers", "sampledQueries", "sampledQueriesDiff", "analyzeShardKeySplitPoints", "vectorClock", "external_validation_keys", "compactStructuredEncryptionData")
+
+func internalCollection(name string) bool {
+	if strings.HasPrefix(name, "system.") || strings.HasPrefix(name, "$") || strings.HasPrefix(name, "cache.") {
+		return true
+	}
+	if strings.HasPrefix(name, "pbm") && len(name) > 3 && name[3] >= 'A' && name[3] <= 'Z' {
+		return true // pbmBackups, pbmLock, pbmPITRChunks, ...
+	}
+	return has(internalCollections, name)
+}
+
+// Application names of MongoDB, Percona and common client tools keep their
+// names: they tell backups, monitoring and shells apart from the application.
+var toolAppNames = set("OplogFetcher", "pbm", "pbm-agent", "pbm-speed-test", "mongodb_exporter", "pmm-agent", "mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop", "mongofiles", "mongosync", "mongomirror", "Studio 3T", "NoSQLBooster", "MongoDB Compass", "MongoDB Automation Agent", "MongoDB Monitoring Module", "MongoDB Backup Agent", "MongoDB CPS Module", "MongoDB Shell", "MongoDB Internal Client")
+
+func toolAppName(name string) bool {
+	return has(toolAppNames, name) || strings.HasPrefix(name, "mongosh") || strings.HasPrefix(name, "MongoDB ") || strings.HasPrefix(name, "pbm") || strings.HasPrefix(name, "Percona ")
+}
+
+// Users created by the server itself.
+var internalUsers = set("__system", "__queryable_backup")
 
 func splitListish(s string) []string {
 	s = strings.NewReplacer("[", "", "]", "").Replace(s)
@@ -244,10 +281,11 @@ func (s *Scanner) discoverNamespace(ns string) {
 	if len(parts) != 2 {
 		return
 	}
-	if !has(internalDBs, parts[0]) {
-		s.register("database", parts[0])
+	if has(internalDBs, parts[0]) {
+		return // admin, local and config collections are MongoDB's or tools'
 	}
-	if !strings.HasPrefix(parts[1], "system.") && !strings.HasPrefix(parts[1], "$") && parts[1] != "startup_log" {
+	s.register("database", parts[0])
+	if !internalCollection(parts[1]) {
 		s.register("collection", parts[1])
 	}
 }
@@ -317,7 +355,7 @@ func (s *Scanner) discoverFreetext(text string) {
 		}
 	}
 	for _, fqdn := range reFQDN.FindAllString(text, -1) {
-		if strings.HasSuffix(fqdn, ".mongodb.org") || strings.HasSuffix(fqdn, ".example.com") || has(knownNonDomains, fqdn) {
+		if strings.HasSuffix(fqdn, ".mongodb.org") || strings.HasSuffix(fqdn, ".example.com") || has(knownNonDomains, fqdn) || !plausibleHostName(fqdn) {
 			continue
 		}
 		parts := strings.Split(fqdn, ".")
@@ -331,9 +369,24 @@ func (s *Scanner) discoverFreetext(text string) {
 		s.register("hostname", parts[0])
 	}
 	for _, cls := range reJavaClass.FindAllString(text, -1) {
-		s.register("java_class", cls)
+		if !publicJavaPackage(cls) {
+			s.register("java_class", cls)
+		}
 	}
 	s.discoverLDAP(text)
+}
+
+// Packages of the JDK, the MongoDB drivers and common frameworks: their class
+// names in stack traces are not the customer's.
+var publicJavaPackages = []string{"java.", "javax.", "jdk.", "sun.", "com.sun.", "kotlin.", "kotlinx.", "scala.", "org.springframework.", "org.mongodb.", "com.mongodb.", "org.bson.", "org.apache.", "io.netty.", "reactor.", "io.micrometer.", "org.hibernate.", "com.fasterxml.", "org.slf4j.", "ch.qos.", "io.grpc.", "com.google.", "org.junit.", "io.vertx.", "io.quarkus."}
+
+func publicJavaPackage(class string) bool {
+	for _, p := range publicJavaPackages {
+		if strings.HasPrefix(class, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverLDAP registers the organisation (dc=) and account (cn=, uid=)
@@ -378,6 +431,31 @@ func (s *Scanner) discoverKey(key string) {
 		}
 	}
 }
+
+// Top-level domains accepted for host names found in free text. Free text
+// also holds Java class names (java.util.concurrent.ThreadPoolExecutor),
+// versions (4.1.13.final) and build hosts; host fields are trusted as is.
+var hostTLDs = set("com", "net", "org", "edu", "gov", "mil", "int", "io", "co", "biz", "info", "local", "internal", "corp", "lan", "intra", "intranet", "cloud", "app", "dev", "ai", "me", "tech", "online", "site", "xyz", "group", "bank", "finance", "insurance", "health", "global", "eu", "us", "uk", "de", "fr", "es", "it", "nl", "be", "ch", "at", "se", "no", "dk", "fi", "pl", "pt", "ie", "ca", "au", "nz", "jp", "cn", "in", "br", "mx", "ar", "cl", "za", "sg", "hk", "tw", "kr", "ru", "il", "ae", "sa", "tr", "id", "my", "th", "vn", "ph", "lu", "cz", "gr", "ro", "hu")
+
+// Public vendor domains that appear in build and version strings.
+var vendorDomains = []string{"redhat.com", "mongodb.com", "mongodb.org", "percona.com", "ubuntu.com", "debian.org", "centos.org", "fedoraproject.org", "github.com", "golang.org", "openssl.org"}
+
+func plausibleHostName(name string) bool {
+	if strings.ToLower(name) != name {
+		return false
+	}
+	labels := strings.Split(name, ".")
+	if !has(hostTLDs, labels[len(labels)-1]) {
+		return false
+	}
+	for _, d := range vendorDomains {
+		if name == d || strings.HasSuffix(name, "."+d) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Scanner) discoverFreetextLight(text string) {
 	if reIP.MatchString(text) || reEmail.MatchString(text) || reFQDN.MatchString(text) || hasLDAPComponent(text) {
 		s.discoverFreetext(text)
@@ -393,6 +471,12 @@ func (s *Scanner) discoverBSONDocument(text string) {
 	for _, m := range reBSONStringField.FindAllStringSubmatch(text, -1) {
 		key, value := m[1], m[2]
 		if s.isSafeBSONValue(key, value) {
+			continue
+		}
+		if categorizedKey(key) {
+			// "setName: \"rs0\"" in an error message is the same replica
+			// set name as "setName":"rs0" in JSON.
+			s.discoverValue(key, value)
 			continue
 		}
 		switch {
@@ -426,6 +510,9 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 				continue
 			}
 			child := inCommand || redact.CommandContext(key)
+			if child && key == "pipeline" {
+				s.discoverPipeline(val)
+			}
 			if redact.PayloadField(key, val, child) {
 				continue
 			}
@@ -448,6 +535,77 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 		}
 	}
 }
+
+// discoverPipeline registers the collections an aggregation pipeline reads
+// or writes: $lookup/$graphLookup from, $unionWith, $out, $merge into, at any
+// depth ($facet, sub-pipelines). Pipelines are otherwise payload.
+func (s *Scanner) discoverPipeline(v any) {
+	stages, ok := v.([]any)
+	if !ok {
+		return
+	}
+	for _, stage := range stages {
+		obj, ok := stage.(map[string]any)
+		if !ok {
+			continue
+		}
+		for op, spec := range obj {
+			switch op {
+			case "$out", "$unionWith", "$merge", "$lookup", "$graphLookup":
+				if name, ok := spec.(string); ok {
+					s.registerCollection(name)
+					continue
+				}
+				if m, ok := spec.(map[string]any); ok {
+					s.discoverStageSpec(m)
+				}
+			case "$facet":
+				if m, ok := spec.(map[string]any); ok {
+					for _, sub := range m {
+						s.discoverPipeline(sub)
+					}
+				}
+			}
+		}
+	}
+}
+
+func (s *Scanner) discoverStageSpec(spec map[string]any) {
+	for key, val := range spec {
+		switch key {
+		case "from", "coll":
+			if name, ok := val.(string); ok {
+				s.registerCollection(name)
+			}
+		case "into":
+			switch x := val.(type) {
+			case string:
+				s.registerCollection(x)
+			case map[string]any:
+				s.discoverStageSpec(x)
+			}
+		case "db":
+			if name, ok := val.(string); ok && !has(internalDBs, name) {
+				s.register("database", name)
+			}
+		case "pipeline":
+			s.discoverPipeline(val)
+		}
+	}
+}
+
+func (s *Scanner) registerCollection(name string) {
+	if !internalCollection(name) {
+		s.register("collection", name)
+	}
+}
+
+// internalCommandDB reports a command run against admin, local or config.
+func internalCommandDB(cmd map[string]any) bool {
+	db, _ := cmd["$db"].(string)
+	return has(internalDBs, db)
+}
+
 func (s *Scanner) discoverCommandData(obj any, depth int) {
 	if depth > 10 {
 		return
@@ -455,7 +613,7 @@ func (s *Scanner) discoverCommandData(obj any, depth int) {
 	switch v := obj.(type) {
 	case map[string]any:
 		for _, key := range []string{"find", "aggregate", "insert", "update", "delete", "findAndModify", "count", "distinct", "getMore", "create", "drop", "renameCollection", "createIndexes", "dropIndexes", "collMod", "explain"} {
-			if coll, ok := v[key].(string); ok && !strings.HasPrefix(coll, "system.") && !strings.HasPrefix(coll, "$") {
+			if coll, ok := v[key].(string); ok && !internalCollection(coll) && !internalCommandDB(v) {
 				s.register("collection", coll)
 			}
 		}
@@ -463,6 +621,9 @@ func (s *Scanner) discoverCommandData(obj any, depth int) {
 			s.discoverNamespace(to)
 		}
 		for key, val := range v {
+			if key == "pipeline" {
+				s.discoverPipeline(val)
+			}
 			if redact.PayloadField(key, val, true) || redact.DocumentContainer(key) {
 				continue
 			}

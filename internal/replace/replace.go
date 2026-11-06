@@ -1,53 +1,85 @@
 package replace
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 
+	"github.com/agustinp/mongodb-log-obfuscator-go/internal/ahocorasick"
 	"github.com/agustinp/mongodb-log-obfuscator-go/internal/registry"
 )
 
-type Matcher struct{ replacements []registry.Replacement }
+// Matcher replaces every mapped original in one left-to-right pass: at each
+// position the longest original wins, and replaced text is never matched
+// again (a replacement such as 10.0.0.1 can also be an original).
+// Originals made only of letters, digits and "_" are replaced as whole
+// tokens; others (hosts, paths, namespaces) as substrings.
+type Matcher struct {
+	replacements []registry.Replacement
+	token        []bool
+	ac           *ahocorasick.Matcher
+}
 
 func New(replacements []registry.Replacement) *Matcher {
-	cp := append([]registry.Replacement(nil), replacements...)
-	return &Matcher{replacements: cp}
+	m := &Matcher{}
+	patterns := make([]string, 0, len(replacements))
+	for _, r := range replacements {
+		if r.Original == "" {
+			continue
+		}
+		m.replacements = append(m.replacements, r)
+		m.token = append(m.token, identifierLike(r.Original))
+		patterns = append(patterns, r.Original)
+	}
+	m.ac = ahocorasick.New(patterns)
+	return m
 }
 
 func (m *Matcher) Apply(s string) string {
-	if m == nil || len(m.replacements) == 0 || s == "" {
-		return s
-	}
-	for _, r := range m.replacements {
-		if r.Original == "" || !strings.Contains(s, r.Original) {
-			continue
-		}
-		if identifierLike(r.Original) {
-			s = replaceIdentifierToken(s, r.Original, r.Value, isIdentifierRune)
-			continue
-		}
-		s = strings.ReplaceAll(s, r.Original, r.Value)
-	}
-	return s
+	return m.apply(s, isIdentifierRune)
 }
 
 // ApplyName replaces originals in a file or directory name. It treats "_" as
 // a separator, so "CS1_db01_mongod.log" has its host name "db01" replaced.
 func (m *Matcher) ApplyName(s string) string {
+	return m.apply(s, isNameRune)
+}
+
+type hit struct{ start, end, id int }
+
+func (m *Matcher) apply(s string, isIdent func(rune) bool) string {
 	if m == nil || len(m.replacements) == 0 || s == "" {
 		return s
 	}
-	for _, r := range m.replacements {
-		if r.Original == "" || !strings.Contains(s, r.Original) {
-			continue
+	var hits []hit
+	m.ac.Each(s, func(id, start, end int) {
+		if m.token[id] && !tokenBoundary(s, start, end, isIdent) {
+			return
 		}
-		if identifierLike(r.Original) {
-			s = replaceIdentifierToken(s, r.Original, r.Value, isNameRune)
-			continue
-		}
-		s = strings.ReplaceAll(s, r.Original, r.Value)
+		hits = append(hits, hit{start, end, id})
+	})
+	if len(hits) == 0 {
+		return s
 	}
-	return s
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].start != hits[j].start {
+			return hits[i].start < hits[j].start
+		}
+		return hits[i].end > hits[j].end
+	})
+	var out strings.Builder
+	out.Grow(len(s))
+	pos := 0
+	for _, h := range hits {
+		if h.start < pos {
+			continue
+		}
+		out.WriteString(s[pos:h.start])
+		out.WriteString(m.replacements[h.id].Value)
+		pos = h.end
+	}
+	out.WriteString(s[pos:])
+	return out.String()
 }
 
 func isNameRune(r rune) bool {
@@ -61,28 +93,6 @@ func identifierLike(s string) bool {
 		}
 	}
 	return true
-}
-
-func replaceIdentifierToken(s, old, replacement string, isIdent func(rune) bool) string {
-	var out strings.Builder
-	start := 0
-	for {
-		idx := strings.Index(s[start:], old)
-		if idx < 0 {
-			out.WriteString(s[start:])
-			return out.String()
-		}
-		idx += start
-		end := idx + len(old)
-		if tokenBoundary(s, idx, end, isIdent) {
-			out.WriteString(s[start:idx])
-			out.WriteString(replacement)
-			start = end
-			continue
-		}
-		out.WriteString(s[start:end])
-		start = end
-	}
 }
 
 func tokenBoundary(s string, start, end int, isIdent func(rune) bool) bool {

@@ -49,7 +49,7 @@ func TestRunRemovesKnownLeaks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(summary.Outputs) != 1 || filepath.Base(summary.Outputs[0]) != "host1.example.com_mongod_obfuscated.log" {
+	if len(summary.Outputs) != 1 || filepath.Base(summary.Outputs[0]) != "host1.domain1.example.com_mongod_obfuscated.log" {
 		t.Fatalf("output name keeps the host name: %v", summary.Outputs)
 	}
 	data, err := os.ReadFile(summary.Outputs[0])

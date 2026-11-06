@@ -1,9 +1,9 @@
-package verify
+package ahocorasick
 
-// matcher finds every occurrence of a set of byte patterns in one pass
+// Matcher finds every occurrence of a set of byte patterns in one pass
 // (Aho-Corasick), so thousands of mapped originals can be searched for in
 // gigabytes of output.
-type matcher struct {
+type Matcher struct {
 	next [][]int32 // next[state] indexed by byteIndex; -1 means none
 	fail []int32
 	out  [][]int32 // pattern ids ending at state
@@ -13,8 +13,8 @@ type matcher struct {
 	width    int
 }
 
-func newMatcher(patterns []string) *matcher {
-	m := &matcher{}
+func New(patterns []string) *Matcher {
+	m := &Matcher{}
 	for i := range m.alphabet {
 		m.alphabet[i] = -1
 	}
@@ -67,7 +67,7 @@ func newMatcher(patterns []string) *matcher {
 	return m
 }
 
-func (m *matcher) addState() int32 {
+func (m *Matcher) addState() int32 {
 	row := make([]int32, m.width)
 	for i := range row {
 		row[i] = -1
@@ -78,8 +78,8 @@ func (m *matcher) addState() int32 {
 	return int32(len(m.next) - 1)
 }
 
-// each calls fn(pattern, start, end) for every occurrence in s.
-func (m *matcher) each(s string, fn func(id, start, end int)) {
+// Each calls fn(pattern, start, end) for every occurrence in s.
+func (m *Matcher) Each(s string, fn func(id, start, end int)) {
 	if m.width == 0 {
 		return
 	}

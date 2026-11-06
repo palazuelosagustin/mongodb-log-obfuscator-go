@@ -480,6 +480,12 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 		for i, member := range x {
 			out[i].key = o.key(member.key)
 			child := inCommand || redact.CommandContext(member.key)
+			if child && member.key == "pipeline" {
+				repl, n := o.pipelineJSON(member.value)
+				out[i].value = repl
+				total += n
+				continue
+			}
 			if redact.DocumentContainer(member.key) || redact.PayloadField(member.key, member.value, child) {
 				repl, n := redactJSONValue(member.value)
 				out[i].value = repl
@@ -502,7 +508,8 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 		return out, total
 	case string:
 		if inCommand && !redact.CommandSafeString(key) {
-			return redact.StringPlaceholder, countStringChange(x, redact.StringPlaceholder)
+			after := redact.Token(x)
+			return after, countStringChange(x, after)
 		}
 		return o.text(x)
 	default:
@@ -536,7 +543,7 @@ func redactJSONPayload(value any, parentKey string) (any, int) {
 		}
 		return out, total
 	case string:
-		after := jsonStringPlaceholder(parentKey)
+		after := jsonStringPlaceholder(parentKey, x)
 		return after, countStringChange(x, after)
 	case json.Number:
 		return json.Number("0"), countStringChange(x.String(), "0")
@@ -552,7 +559,7 @@ func redactJSONPayload(value any, parentKey string) (any, int) {
 	}
 }
 
-func jsonStringPlaceholder(parentKey string) string {
+func jsonStringPlaceholder(parentKey, value string) string {
 	switch parentKey {
 	case "$date":
 		return "1970-01-01T00:00:00Z"
@@ -563,7 +570,7 @@ func jsonStringPlaceholder(parentKey string) string {
 	case "$numberLong", "$numberInt", "$numberDouble", "$numberDecimal":
 		return "0"
 	default:
-		return redact.StringPlaceholder
+		return redact.Token(value)
 	}
 }
 
@@ -601,7 +608,8 @@ func (o *obfuscator) bsonValue(v any, key string, inCommand bool) (any, int) {
 	switch x := v.(type) {
 	case string:
 		if inCommand && !redact.CommandSafeString(key) {
-			return redact.StringPlaceholder, countStringChange(x, redact.StringPlaceholder)
+			after := redact.Token(x)
+			return after, countStringChange(x, after)
 		}
 		return o.text(x)
 	case bson.D:
@@ -651,7 +659,7 @@ func redactBSONPayload(value any, parentKey string) (any, int) {
 		}
 		return out, total
 	case string:
-		after := jsonStringPlaceholder(parentKey)
+		after := jsonStringPlaceholder(parentKey, x)
 		return after, countStringChange(x, after)
 	case bool:
 		if x {

@@ -30,6 +30,11 @@ Useful flags:
 - `--dry-run`: discover and summarize without writing output.
 - `--log-only`, `--ftdc-only`: restrict input types.
 - `--verify`: check the written output for possible leaks (see below).
+- `--keep-equality`: redacted strings become keyed hashes (`obf_3f9a2c1b7d4e`)
+  instead of one placeholder, so equal values stay equal (hot keys, skewed
+  filters). The key is stored in the mapping; without it the hashes cannot be
+  checked against guessed values. Use `--load-mapping` to hash later inputs the
+  same way.
 
 Log files are written as `*_obfuscated.log`. FTDC files keep their relative
 paths under the output root. Mapped names in file and directory names are
@@ -41,6 +46,37 @@ The mapping reverses the obfuscation. It is written with mode `0600` next to
 the output directory, never inside it: share the output directory, keep the
 mapping. A `cluster_mapping.json` left inside an output directory by an older
 version is reported by `verify`; delete it before sharing.
+
+## Mapped names
+
+Each original gets one replacement, used everywhere (logs, FTDC, file names),
+and replacements are applied in one pass, so a replacement is never replaced
+again. When a value is seen in several roles, the most specific wins
+(replica set, shard, database, collection, user, ... before free-text data).
+
+Names keep the structure needed to read a topology:
+
+| original | replacement |
+|---|---|
+| `db7.phx.corp.com`, `db8.phx.corp.com`, `db9.gso.corp.com` | `host1.zone1.domain1.example.com`, `host2.zone1.domain1.example.com`, `host3.zone2.domain1.example.com` |
+| `db7` (short name of the same host) | `host1` |
+| `mongo-rs0-0.mongo-rs0.psmdb.svc.cluster.local` | `host4.zone3.zone4.svc.cluster.local` |
+| `203.0.113.7`, `203.0.113.9` | `198.18.0.7`, `198.18.0.9` (same /24, last octet kept) |
+| `172.20.5.9` | `10.0.1.9` (private stays private) |
+
+Public addresses map into 198.18.0.0/15 (then 100.64.0.0/10) and private ones
+into 10.0.0.0/8; platform suffixes (`svc.cluster.local`, `compute.internal`,
+`amazonaws.com`, `mongodb.net`, ...) are kept. Domain labels such as `phx` are
+only replaced as part of a host or domain name.
+
+Kept as they are, because they say what MongoDB or a tool was doing:
+collections of `admin`, `local` and `config` (`oplog.rs`, `transactions`,
+`pbmBackups`, ...), `system.*` collections, the `__system` user, application
+names of MongoDB, Percona and common client tools (`pbm-agent`,
+`mongodb_exporter`, `mongosh ...`, `MongoDB Compass`, `mongodump`, ...), and
+Java classes of the JDK, MongoDB drivers and common frameworks in stack
+traces. Host names in free text are only recognised with a known top-level
+domain and in lowercase, so class names and versions are not taken for hosts.
 
 ## Verify
 
@@ -79,6 +115,13 @@ mapped), index names, enum-like options (`readConcern.level`, `w`, `mode`,
 collation, `verbosity`, ...), mongos client metadata and Extended JSON type
 wrappers (`$uuid`, `$oid`, `$numberLong`, ...). `comment` and any other key
 carrying application input are replaced.
+
+Aggregation pipelines keep their structure: `$match` (and `$geoNear`,
+`$search`, ...) is redacted like any filter; in other stages field references
+(`"$amount"`, `"$$ROOT"`), numbers (`$limit`, `$sort`, `$project` flags) and
+booleans are kept, `$lookup`/`$graphLookup` field names are kept, the
+collections of `$lookup`, `$unionWith`, `$out` and `$merge` are mapped, and any
+other string is replaced.
 
 User documents are redacted wherever they appear, not only in commands:
 replicated operations (`o`, `o2` in "Applied op" lines), duplicate-key values
