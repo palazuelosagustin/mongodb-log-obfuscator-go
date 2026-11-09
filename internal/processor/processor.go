@@ -468,7 +468,7 @@ func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) 
 		if !ok {
 			return doc, 0, true
 		}
-		ob, n := matcher.bsonDoc(inner, false)
+		ob, n := matcher.bsonDoc(inner, "", false)
 		return ftdc.ReplaceField(doc, "doc", ob), n, true
 	case ftdc.TypeMetricChunk:
 		bin, ok := ftdc.BinaryField(doc, "data")
@@ -483,7 +483,7 @@ func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) 
 		if err := bson.Unmarshal(chunk.RefBSON, &ref); err != nil {
 			return nil, 0, false
 		}
-		ob, n := matcher.bsonDoc(ref, false)
+		ob, n := matcher.bsonDoc(ref, "", false)
 		if chunk.RefBSON, err = bson.Marshal(ob); err != nil {
 			return nil, 0, false
 		}
@@ -502,6 +502,13 @@ func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) 
 type obfuscator struct {
 	values *replace.Matcher
 	keys   *replace.Matcher
+	// pathKeys also maps user, database and collection names, for keys that
+	// are paths (/run/user/<uid>, /data/<db>/...).
+	pathKeys *replace.Matcher
+	// databases and collections map names used as keys of documents that
+	// describe a catalog ({"<db>": {"collections": {"<coll>": ...}}}).
+	databases   map[string]string
+	collections map[string]string
 	// net replaces names the mapping does not know (see redact.SafetyNet).
 	net *redact.SafetyNet
 }
@@ -512,11 +519,23 @@ func newObfuscator(reg *registry.Registry) *obfuscator {
 	for _, r := range reps {
 		values = append(values, r.Value)
 	}
+	pathCats := append(append([]string{}, registry.NetworkAndPathCategories...), "user", "database", "collection")
 	return &obfuscator{
-		values: replace.New(reps),
-		keys:   replace.New(reg.ReplacementsFor(registry.NetworkAndPathCategories...)),
-		net:    redact.NewSafetyNet(values),
+		values:      replace.New(reps),
+		keys:        replace.New(reg.ReplacementsFor(registry.NetworkAndPathCategories...)),
+		pathKeys:    replace.New(reg.ReplacementsFor(pathCats...)),
+		databases:   replacementMap(reg.ReplacementsFor("database")),
+		collections: replacementMap(reg.ReplacementsFor("collection")),
+		net:         redact.NewSafetyNet(values),
 	}
+}
+
+func replacementMap(reps []registry.Replacement) map[string]string {
+	m := make(map[string]string, len(reps))
+	for _, r := range reps {
+		m[r.Original] = r.Value
+	}
+	return m
 }
 
 // text maps and scrubs free text (string values, log prefixes) and applies
@@ -529,11 +548,39 @@ func (o *obfuscator) textKey(s, key string) (string, int) {
 	return out, n + m
 }
 
-func (o *obfuscator) key(k string) string {
-	if !strings.ContainsAny(k, ":/") {
-		return k
+// key maps a JSON/BSON key; parent is the original key of the enclosing
+// document. Field names stay as they are, except:
+//   - keys with "/" (paths) or ":" (host:port) get hosts, IPs and paths
+//     replaced, and paths also user, database and collection names;
+//   - a key equal to a known database name, and a key equal to a known
+//     collection name directly under a database or "collections" key, are
+//     catalog descriptions and get their names replaced;
+//   - a "<db>.<coll>" key with a known database is a namespace.
+func (o *obfuscator) key(k, parent string) string {
+	if strings.IndexByte(k, '/') >= 0 && o.pathKeys != nil {
+		return o.pathKeys.Apply(k)
 	}
-	return o.keys.Apply(k)
+	if strings.IndexByte(k, ':') >= 0 {
+		return o.keys.Apply(k)
+	}
+	if r, ok := o.databases[k]; ok {
+		return r
+	}
+	if _, isDB := o.databases[parent]; isDB || parent == "collections" {
+		if r, ok := o.collections[k]; ok {
+			return r
+		}
+	}
+	if i := strings.IndexByte(k, '.'); i > 0 {
+		if db, ok := o.databases[k[:i]]; ok {
+			coll := k[i+1:]
+			if r, ok := o.collections[coll]; ok {
+				coll = r
+			}
+			return db + "." + coll
+		}
+	}
+	return k
 }
 
 func replaceLogLine(line string, matcher *replace.Matcher) (string, int, error) {
@@ -677,7 +724,7 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 		out := make(jsonObject, len(x))
 		total := 0
 		for i, member := range x {
-			out[i].key = o.key(member.key)
+			out[i].key = o.key(member.key, key)
 			child := inCommand || redact.CommandContext(member.key)
 			if child && member.key == "pipeline" {
 				repl, n := o.pipelineJSON(member.value)
@@ -686,7 +733,7 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 				continue
 			}
 			if redact.DocumentContainer(member.key) || redact.PayloadField(member.key, member.value, child) {
-				repl, n := redactJSONValue(member.value)
+				repl, n := o.redactJSONPayload(member.value, member.key)
 				out[i].value = repl
 				total += n
 				continue
@@ -716,18 +763,20 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 	}
 }
 
-func redactJSONValue(value any) (any, int) {
-	return redactJSONPayload(value, "")
+func (o *obfuscator) redactJSONValue(value any) (any, int) {
+	return o.redactJSONPayload(value, "")
 }
 
-func redactJSONPayload(value any, parentKey string) (any, int) {
+// redactJSONPayload replaces every value of a document payload; keys are
+// field names and stay, apart from the names key() maps.
+func (o *obfuscator) redactJSONPayload(value any, parentKey string) (any, int) {
 	switch x := value.(type) {
 	case jsonObject:
 		out := make(jsonObject, len(x))
 		total := 0
 		for i, member := range x {
-			out[i].key = member.key
-			repl, n := redactJSONPayload(member.value, member.key)
+			out[i].key = o.key(member.key, parentKey)
+			repl, n := o.redactJSONPayload(member.value, member.key)
 			out[i].value = repl
 			total += n
 		}
@@ -736,7 +785,7 @@ func redactJSONPayload(value any, parentKey string) (any, int) {
 		out := make([]any, len(x))
 		total := 0
 		for i, item := range x {
-			repl, n := redactJSONPayload(item, parentKey)
+			repl, n := o.redactJSONPayload(item, parentKey)
 			out[i] = repl
 			total += n
 		}
@@ -781,17 +830,18 @@ func countStringChange(before, after string) int {
 }
 
 func obfuscateBSON(doc bson.D, matcher *replace.Matcher, inCommand bool) (bson.D, int) {
-	return (&obfuscator{values: matcher, keys: matcher}).bsonDoc(doc, inCommand)
+	return (&obfuscator{values: matcher, keys: matcher}).bsonDoc(doc, "", inCommand)
 }
 
-func (o *obfuscator) bsonDoc(doc bson.D, inCommand bool) (bson.D, int) {
+// bsonDoc obfuscates a BSON document; parent is the key it is stored under.
+func (o *obfuscator) bsonDoc(doc bson.D, parent string, inCommand bool) (bson.D, int) {
 	out := make(bson.D, len(doc))
 	total := 0
 	for i, elem := range doc {
-		out[i].Key = o.key(elem.Key)
+		out[i].Key = o.key(elem.Key, parent)
 		child := inCommand || redact.CommandContext(elem.Key)
 		if redact.DocumentContainer(elem.Key) || redact.PayloadField(elem.Key, elem.Value, child) {
-			repl, n := redactBSONPayload(elem.Value, "")
+			repl, n := o.redactBSONPayload(elem.Value, elem.Key)
 			out[i].Value = repl
 			total += n
 			continue
@@ -812,7 +862,7 @@ func (o *obfuscator) bsonValue(v any, key string, inCommand bool) (any, int) {
 		}
 		return o.textKey(x, key)
 	case bson.D:
-		return o.bsonDoc(x, inCommand)
+		return o.bsonDoc(x, key, inCommand)
 	case bson.A:
 		out := make(bson.A, len(x))
 		total := 0
@@ -827,14 +877,14 @@ func (o *obfuscator) bsonValue(v any, key string, inCommand bool) (any, int) {
 	}
 }
 
-func redactBSONPayload(value any, parentKey string) (any, int) {
+func (o *obfuscator) redactBSONPayload(value any, parentKey string) (any, int) {
 	switch x := value.(type) {
 	case bson.D:
 		out := make(bson.D, len(x))
 		total := 0
 		for i, elem := range x {
-			out[i].Key = elem.Key
-			repl, n := redactBSONPayload(elem.Value, elem.Key)
+			out[i].Key = o.key(elem.Key, parentKey)
+			repl, n := o.redactBSONPayload(elem.Value, elem.Key)
 			out[i].Value = repl
 			total += n
 		}
@@ -843,7 +893,7 @@ func redactBSONPayload(value any, parentKey string) (any, int) {
 		out := make(bson.A, len(x))
 		total := 0
 		for i, item := range x {
-			repl, n := redactBSONPayload(item, parentKey)
+			repl, n := o.redactBSONPayload(item, parentKey)
 			out[i] = repl
 			total += n
 		}
@@ -852,7 +902,7 @@ func redactBSONPayload(value any, parentKey string) (any, int) {
 		out := make(bson.A, len(x))
 		total := 0
 		for i, item := range x {
-			repl, n := redactBSONPayload(item, parentKey)
+			repl, n := o.redactBSONPayload(item, parentKey)
 			out[i] = repl
 			total += n
 		}

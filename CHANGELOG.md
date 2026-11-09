@@ -6,6 +6,17 @@ README.
 
 ## Unreleased
 
+- Database and collection names used as keys are mapped: documents that
+  describe the catalog (`{"<db>": {"collections": {"<coll>": ...}}}`), and
+  `<db>.<collection>` keys. Before, an application document storing the
+  catalog kept the real names in its keys, inside redacted payloads too.
+- Path keys also map user, database and collection names: an FTDC mount such
+  as `/run/user/<uid>` kept the user name.
+- `verify` reports those names in keys, and masks originals in the key path
+  it prints.
+- Tests guard that MongoDB query hashes (`queryHash`, `planCacheKey`, ...)
+  keep their original values.
+
 ## v0.1.0 - 2026-11-06
 
 First versioned release.

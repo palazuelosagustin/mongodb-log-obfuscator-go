@@ -28,14 +28,14 @@ var reFieldRef = regexp.MustCompile(`^\$\$?[A-Za-z_][\w.]*$`)
 func (o *obfuscator) pipelineJSON(v any) (any, int) {
 	stages, ok := v.([]any)
 	if !ok {
-		return redactJSONValue(v)
+		return o.redactJSONValue(v)
 	}
 	out := make([]any, len(stages))
 	total := 0
 	for i, stage := range stages {
 		obj, ok := stage.(jsonObject)
 		if !ok {
-			repl, n := redactJSONValue(stage)
+			repl, n := o.redactJSONValue(stage)
 			out[i], total = repl, total+n
 			continue
 		}
@@ -52,13 +52,13 @@ func (o *obfuscator) pipelineJSON(v any) (any, int) {
 
 func (o *obfuscator) stageJSON(op string, arg any) (any, int) {
 	if filterStages[op] {
-		return redactJSONValue(arg)
+		return o.redactJSONValue(arg)
 	}
 	switch op {
 	case "$facet":
 		obj, ok := arg.(jsonObject)
 		if !ok {
-			return redactJSONValue(arg)
+			return o.redactJSONValue(arg)
 		}
 		res := make(jsonObject, len(obj))
 		total := 0
@@ -91,7 +91,7 @@ func (o *obfuscator) stageSpecJSON(v any, key string) (any, int) {
 			case m.key == "pipeline" || (m.key == "whenMatched" && isArray(m.value)):
 				repl, n = o.pipelineJSON(m.value)
 			case stageFilterKeys[m.key] || filterStages[m.key]:
-				repl, n = redactJSONValue(m.value)
+				repl, n = o.redactJSONValue(m.value)
 			default:
 				repl, n = o.stageSpecJSON(m.value, m.key)
 			}

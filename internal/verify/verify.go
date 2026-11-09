@@ -71,6 +71,33 @@ type Options struct {
 // that equal a collection or database name are kept by design.
 var keyCategories = map[string]bool{"hostname": true, "fqdn": true, "domain": true, "ip": true, "path": true, "email": true}
 
+// pathKeyCategories also count in keys that are paths (contain "/").
+var pathKeyCategories = map[string]bool{"user": true, "database": true, "collection": true}
+
+// keyLeak reports whether an original found in a key is a leak: always for
+// hosts, IPs and paths; user, database and collection names inside a path
+// key; a whole key equal to a database name; a whole key equal to a
+// collection name under "collections" or a database (a catalog document).
+// Other field names that equal a collection or user name are kept by design.
+func keyLeak(o original, s, parent string, start, end int) bool {
+	if keyCategories[o.category] {
+		return true
+	}
+	if strings.IndexByte(s, '/') >= 0 && pathKeyCategories[o.category] {
+		return true
+	}
+	whole := start == 0 && end == len(s)
+	switch o.category {
+	case "database":
+		return whole || (start == 0 && end < len(s) && s[end] == '.')
+	case "collection":
+		return whole && (parent == "collections" || reDatabaseName.MatchString(parent))
+	}
+	return false
+}
+
+var reDatabaseName = regexp.MustCompile(`^database\d+$`)
+
 // Placeholder vocabulary: originals that occur inside it are not searched,
 // or every replacement would match.
 const vocabulary = "obf_ zone obfuscated string obfuscated payload obfuscated-number example.com /obfuscated/path database collection host domain user replset shard app data_ Organization Location com.example.app.Class redacted"
@@ -300,7 +327,7 @@ func (c *checker) walkJSON(v any, path []string, rel string, lineNo int) {
 	case map[string]any:
 		for k, val := range x {
 			p := append(path, k)
-			c.check(k, "key", "", rel, lineNo, strings.Join(p, "."))
+			c.check(k, "key", last(path), rel, lineNo, strings.Join(p, "."))
 			c.walkJSON(val, p, rel, lineNo)
 		}
 	case []any:
@@ -365,7 +392,7 @@ func (c *checker) walkBSON(v any, path []string, rel string) {
 	case bson.D:
 		for _, e := range x {
 			p := append(path, e.Key)
-			c.check(e.Key, "key", "", rel, 0, strings.Join(p, "."))
+			c.check(e.Key, "key", last(path), rel, 0, strings.Join(p, "."))
 			c.walkBSON(e.Value, p, rel)
 		}
 	case bson.A:
@@ -381,7 +408,15 @@ func (c *checker) walkBSON(v any, path []string, rel string) {
 	}
 }
 
-// check looks for leaks in one key or string value.
+func last(path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	return path[len(path)-1]
+}
+
+// check looks for leaks in one key or string value; key is the key a value
+// is stored under, or the parent key of a key.
 func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 	if s == "" {
 		return
@@ -391,7 +426,7 @@ func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 		if o.token && !replace.TokenBoundary(s, start, end) {
 			return
 		}
-		if where == "key" && !keyCategories[o.category] {
+		if where == "key" && !keyLeak(o, s, key, start, end) {
 			return
 		}
 		c.add(Finding{File: rel, Line: lineNo, Path: path, Kind: "mapped", Category: o.category, Hint: "original of " + o.replacement})
@@ -440,7 +475,45 @@ func (c *checker) add(f Finding) {
 		return
 	}
 	c.seen[id] = true
+	f.Path = c.maskPath(f.Path)
 	c.report.Samples = append(c.report.Samples, f)
+}
+
+// maskPath masks originals inside a key path, so a leaked key does not
+// reappear unmasked in the report.
+func (c *checker) maskPath(path string) string {
+	if path == "" {
+		return path
+	}
+	type span struct{ start, end int }
+	var spans []span
+	c.ac.Each(path, func(id, start, end int) {
+		if c.originals[id].token && !replace.TokenBoundary(path, start, end) {
+			return
+		}
+		spans = append(spans, span{start, end})
+	})
+	if len(spans) == 0 {
+		return path
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start == spans[j].start {
+			return spans[i].end > spans[j].end
+		}
+		return spans[i].start < spans[j].start
+	})
+	var b strings.Builder
+	pos := 0
+	for _, sp := range spans {
+		if sp.start < pos {
+			continue
+		}
+		b.WriteString(path[pos:sp.start])
+		b.WriteString(mask(path[sp.start:sp.end]))
+		pos = sp.end
+	}
+	b.WriteString(path[pos:])
+	return b.String()
 }
 
 func publicIPv4(s string) bool {
