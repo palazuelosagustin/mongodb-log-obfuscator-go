@@ -42,8 +42,16 @@ mongodb-log-obfuscator-go --verify --out ~/cases/CS0012345/obfuscated ~/cases/CS
 
 - Values the tool discovers (hosts, IPs, databases, collections, users,
   replica sets, shards, paths, emails, application names, LDAP/X.509 names) are
-  replaced everywhere, in values, host/path keys and file names, with the same
-  replacement in every file.
+  replaced everywhere, in values, keys and file names, with the same
+  replacement in every file. Keys are field names and stay, except host:port
+  and path keys (users, databases and collections inside a path are mapped
+  too), keys equal to a database name, `<db>.<collection>` keys, and
+  collection names under a database or `collections` key (documents that
+  describe the catalog).
+- MongoDB's own query hashes (`queryHash`, `planCacheKey`,
+  `planCacheShapeHash`, `queryShapeHash`) keep their original values, so
+  lines can be matched with the original log, explain output and the plan
+  cache.
 - Inside commands, every string is replaced unless its key is on an
   allowlist of diagnostic values; filter, update, document and pipeline
   values are replaced; user documents are replaced wherever they are logged
@@ -197,9 +205,12 @@ domain and in lowercase, so class names and versions are not taken for hosts.
 directory) read every output file, including the decompressed FTDC metric
 chunks, and report:
 
-- originals from the mapping still present in a value, or in a key for hosts,
-  IPs, paths and emails (field names equal to a collection name are kept by
-  design);
+- originals from the mapping still present in a value, or in a key: hosts,
+  IPs, paths and emails anywhere in a key; users, databases and collections
+  inside a path key; a key equal to a database name or `<db>.<collection>`; a
+  collection name under a database or `collections` key (other field names
+  equal to a collection or user name are kept by design). Report paths have
+  originals masked;
 - emails outside `example.com`, public IPv4 addresses, payment card numbers
   (13-19 digits passing the Luhn check) and LDAP/X.509 names (`dc=`, `cn=`,
   `uid=`, `o=`) that are not replacements;
