@@ -6,6 +6,8 @@ README.
 
 ## Unreleased
 
+## v0.1.1 - 2026-11-09
+
 - Database and collection names used as keys are mapped: documents that
   describe the catalog (`{"<db>": {"collections": {"<coll>": ...}}}`), and
   `<db>.<collection>` keys. Before, an application document storing the
