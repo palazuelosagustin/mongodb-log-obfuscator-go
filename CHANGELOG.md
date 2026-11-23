@@ -6,6 +6,11 @@ README.
 
 ## Unreleased
 
+- UUIDs are kept whole. About 1 in 10,000 had all-digit groups that passed
+  the card-number check and were partly rewritten to `obfuscated-number`,
+  which broke correlation by connection, collection or index build UUID.
+  `verify` no longer reports such a UUID as a card number.
+
 ## v0.1.1 - 2026-11-09
 
 - Database and collection names used as keys are mapped: documents that

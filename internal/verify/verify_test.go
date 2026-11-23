@@ -17,7 +17,8 @@ func TestDirFindsLeaksWithoutPrintingThem(t *testing.T) {
 		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"q":"dc=Organization1,dc=com cn=user1"}}`,        // replacements: clean
 		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"q":"O=Acme"}}`,                                  // ldap
 		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"ok":"10.0.0.1 host1.example.com user1@example.com"}}`,
-		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"cursorid":{"$numberLong":"4111111111111111"}}}`, // not a card
+		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"cursorid":{"$numberLong":"4111111111111111"}}}`,      // not a card
+		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"buildUUID":"61949369-6126-4783-8c4e-d2211f649f53"}}`, // UUID, not a card
 	}
 	if err := os.WriteFile(filepath.Join(dir, "mongod_obfuscated.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)

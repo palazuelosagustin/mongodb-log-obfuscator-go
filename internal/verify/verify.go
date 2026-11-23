@@ -105,7 +105,6 @@ const vocabulary = "obf_ zone obfuscated string obfuscated payload obfuscated-nu
 var (
 	reEmail = regexp.MustCompile(`\b[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b`)
 	reIPv4  = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	reCard  = regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`)
 	reLDAP  = regexp.MustCompile(`(?i)\b(dc|cn|uid|o)=([^,;)\s"'\\{}*%?]+)`)
 	// Replacement shapes the obfuscator writes into LDAP names.
 	reReplacementName = regexp.MustCompile(`^((user|host|cert)\d+|Organization\d*$)`)
@@ -446,10 +445,8 @@ func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 		}
 	}
 	if where == "value" && !numericWrapperKeys[key] {
-		for _, m := range reCard.FindAllString(s, -1) {
-			if redact.LuhnCard(m) {
-				c.add(Finding{File: rel, Line: lineNo, Path: path, Kind: "card-number", Hint: mask(m)})
-			}
+		for _, sp := range redact.CardNumbers(s) {
+			c.add(Finding{File: rel, Line: lineNo, Path: path, Kind: "card-number", Hint: mask(s[sp[0]:sp[1]])})
 		}
 	}
 	if strings.IndexByte(s, '=') >= 0 {
