@@ -322,13 +322,13 @@ the config locally with `goreleaser release --snapshot --clean`.
 
 ## Agent skill
 
-`skills/.claude/mongodb-log-obfuscator-go/` is a Claude Code skill (with the
-same text for Codex in `skills/.codex/mongodb-log-obfuscator-go/`) that tells
+`skills/.claude/SKILL.md` is a Claude Code skill (with the same text for
+Codex in `skills/.codex/SKILL.md`) that tells
 an agent to obfuscate and verify customer logs before reading them, and how to
 use the output with `mongodb-logstat` and `mongodb-ftdcstat`. Install it with:
 
 ```bash
-ln -s ~/bin/mongodb-log-obfuscator-go/skills/.claude/mongodb-log-obfuscator-go ~/.claude/skills/mongodb-log-obfuscator-go
+ln -s ~/bin/mongodb-log-obfuscator-go/skills/.claude ~/.claude/skills/mongodb-log-obfuscator-go
 ```
 
 ## Development
