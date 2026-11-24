@@ -45,8 +45,11 @@ type Summary struct {
 	FTDCFiles         int
 	Replacements      int
 	PayloadRedactions int
-	DiscoverTime      time.Duration
-	ReplaceTime       time.Duration
+	// OrgLabels counts organization names taken from domain names
+	// ("acme" of db1.acme.com), replaced wherever they appear.
+	OrgLabels    int
+	DiscoverTime time.Duration
+	ReplaceTime  time.Duration
 	// Outputs are the written paths.
 	Outputs []string
 	// Failures are files not written; Warnings are files written with a
@@ -124,6 +127,11 @@ func Run(cfg Config) (Summary, error) {
 	cfg.Registry.MergeCollectors(collectors)
 	reps := cfg.Registry.Replacements()
 	summary.Replacements = len(reps)
+	for _, label := range cfg.Registry.DomainOrgLabels() {
+		if _, ok := cfg.Registry.Categories["org"][label]; ok {
+			summary.OrgLabels++
+		}
+	}
 	if cfg.DryRun {
 		return summary, nil
 	}

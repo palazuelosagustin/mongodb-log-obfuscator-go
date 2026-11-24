@@ -174,3 +174,54 @@ func TestRunMapsClientMetadataAppNames(t *testing.T) {
 		}
 	}
 }
+
+// The organization label of a customer domain is replaced wherever it
+// appears, in any case and next to digits, and verify finds no leak.
+func TestRunReplacesDomainOrgLabels(t *testing.T) {
+	lines := []string{
+		`{"t":{"$date":"2026-11-01T10:00:00.000Z"},"s":"I","c":"NETWORK","id":22943,"ctx":"listener","msg":"Connection accepted","attr":{"remote":"db1.secretcorp.com:50001","connectionId":4}}`,
+		`{"t":{"$date":"2026-11-01T10:00:01.000Z"},"s":"I","c":"NETWORK","id":51800,"ctx":"conn1","msg":"client metadata","attr":{"remote":"10.1.2.3:50000","doc":{"driver":{"name":"nodejs","version":"6.3.0"},"application":{"name":"appd-mongo-dbagent-secretcorp1-1-prod"}}}}`,
+		`{"t":{"$date":"2026-11-01T10:00:02.000Z"},"s":"E","c":"CONTROL","id":1,"ctx":"main","msg":"Error","attr":{"error":"SECRETCORP_reports job for SecretCorp-EU failed"}}`,
+		`{"t":{"$date":"2026-11-01T10:00:02.500Z"},"s":"E","c":"CONTROL","id":1,"ctx":"main","msg":"Error","attr":{"error":"agent-secretcorp1-1-prod disconnected"}}`,
+		`{"t":{"$date":"2026-11-01T10:00:03.000Z"},"s":"I","c":"NETWORK","id":22943,"ctx":"listener","msg":"Connection accepted","attr":{"remote":"cl0.abcd.mongodb.net:50001","connectionId":5}}`,
+	}
+	root := t.TempDir()
+	in := filepath.Join(root, "in", "mongod.log")
+	if err := os.MkdirAll(filepath.Dir(in), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New()
+	out := filepath.Join(root, "out")
+	summary, err := Run(Config{Files: []inputs.File{{Path: in, Type: inputs.Log}}, InputRoot: filepath.Dir(in), OutputRoot: out, MappingPath: filepath.Join(root, "out_mapping.json"), Jobs: 1, Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.OrgLabels != 1 || reg.Categories["org"]["secretcorp"] == "" {
+		t.Fatalf("org labels = %d, org = %v", summary.OrgLabels, reg.Categories["org"])
+	}
+	data, err := os.ReadFile(summary.Outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(strings.ToLower(text), "secretcorp") {
+		t.Errorf("organization name remains:\n%s", text)
+	}
+	org := reg.Categories["org"]["secretcorp"]
+	// the application name is mapped whole; the org rule covers free text
+	for _, want := range []string{`"application":{"name":"app1"}`, "agent-" + org + "_1-1-prod disconnected", org + "_reports job for " + org + "-EU", ".mongodb.net:50001"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lacks %s:\n%s", want, text)
+		}
+	}
+	report, err := verify.Dir(out, verify.Options{Mapping: reg.Report()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 0 {
+		t.Errorf("verify found %v", report.Counts)
+	}
+}

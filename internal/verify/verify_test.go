@@ -51,3 +51,22 @@ func TestDirFindsLeaksWithoutPrintingThem(t *testing.T) {
 		}
 	}
 }
+
+func TestDirFindsOrgLabelsInAnyCase(t *testing.T) {
+	dir := t.TempDir()
+	lines := []string{
+		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"application":{"name":"appd-mongo-dbagent-ACME1-1-prod"}}}`, // leak
+		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"error":"Acme_reports failed"}}`,                            // leak
+		`{"t":{"$date":"2026-11-01T10:00:00Z"},"msg":"x","attr":{"note":"macmed academy Organization1_1"}}`,                  // clean
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mongod_obfuscated.log"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Dir(dir, Options{Mapping: map[string]map[string]string{"org": {"acme": "Organization1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Counts["mapped org"] != 2 || report.Total != 2 {
+		t.Errorf("counts = %v, want 2 mapped org", report.Counts)
+	}
+}

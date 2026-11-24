@@ -16,6 +16,15 @@ README.
   `appName` in a slow query, so clients whose operations were never slow,
   such as monitoring agents, kept their real names.
 
+- The organization name of each customer domain (`acme` of `db1.acme.com`)
+  joins the `org` category and is replaced wherever it appears, in any case
+  and next to digits, `_` or `-`: an agent or job name such as
+  `agent-acme1-prod` inside an error message no longer keeps it.
+  Platform suffixes, vendor names and generic words are not taken. Org names
+  of 4 or more letters from LDAP names match the same way.
+- The run summary prints how many organization names came from domains.
+- `verify` searches organization names the same way.
+
 ## v0.1.1 - 2026-11-09
 
 - Database and collection names used as keys are mapped: documents that

@@ -124,14 +124,17 @@ type checker struct {
 	opts      Options
 	originals []original
 	ac        *ahocorasick.Matcher
-	report    Report
-	seen      map[string]bool
-	mu        sync.Mutex // guards report and seen of the top checker
+	// labels are organization labels, searched in the lower-cased text.
+	labels  []original
+	labelAC *ahocorasick.Matcher
+	report  Report
+	seen    map[string]bool
+	mu      sync.Mutex // guards report and seen of the top checker
 }
 
 // fork returns a checker for one block or file that shares the patterns.
 func (c *checker) fork() *checker {
-	return &checker{opts: c.opts, originals: c.originals, ac: c.ac, seen: map[string]bool{}, report: Report{Counts: map[string]int{}}}
+	return &checker{opts: c.opts, originals: c.originals, ac: c.ac, labels: c.labels, labelAC: c.labelAC, seen: map[string]bool{}, report: Report{Counts: map[string]int{}}}
 }
 
 // merge adds the findings of a fork.
@@ -166,7 +169,7 @@ func Dir(dir string, opts Options) (Report, error) {
 	}
 	c := &checker{opts: opts, seen: map[string]bool{}}
 	c.report = Report{Dir: dir, Counts: map[string]int{}}
-	var patterns []string
+	var patterns, labelPatterns []string
 	cats := make([]string, 0, len(opts.Mapping))
 	for cat := range opts.Mapping {
 		cats = append(cats, cat)
@@ -180,11 +183,20 @@ func Dir(dir string, opts Options) (Report, error) {
 			if len(orig) < 3 || strings.Contains(vocabulary, orig) {
 				continue
 			}
+			if cat == "org" && registry.OrgLabel(orig) {
+				// matched like the obfuscator does: any case, next to digits
+				c.labels = append(c.labels, original{category: cat, value: orig, replacement: repl})
+				labelPatterns = append(labelPatterns, replace.ASCIILower(orig))
+				continue
+			}
 			c.originals = append(c.originals, original{category: cat, value: orig, replacement: repl, token: replace.IdentifierLike(orig)})
 			patterns = append(patterns, orig)
 		}
 	}
 	c.ac = ahocorasick.New(patterns)
+	if len(labelPatterns) > 0 {
+		c.labelAC = ahocorasick.New(labelPatterns)
+	}
 
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -430,6 +442,15 @@ func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 		}
 		c.add(Finding{File: rel, Line: lineNo, Path: path, Kind: "mapped", Category: o.category, Hint: "original of " + o.replacement})
 	})
+	if c.labelAC != nil {
+		c.labelAC.Each(replace.ASCIILower(s), func(id, start, end int) {
+			o := c.labels[id]
+			if !replace.LabelBoundary(s, start, end) || (where == "key" && !keyLeak(o, s, key, start, end)) {
+				return
+			}
+			c.add(Finding{File: rel, Line: lineNo, Path: path, Kind: "mapped", Category: o.category, Hint: "original of " + o.replacement})
+		})
+	}
 	if strings.IndexByte(s, '@') >= 0 {
 		for _, m := range reEmail.FindAllString(s, -1) {
 			domain := strings.ToLower(m[strings.LastIndexByte(m, '@')+1:])
