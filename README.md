@@ -40,9 +40,9 @@ mongodb-log-obfuscator-go --verify --out ~/cases/CS0012345/obfuscated ~/cases/CS
 
 ## What is guaranteed
 
-- Values the tool discovers (hosts, IPs, databases, collections, users,
-  replica sets, shards, paths, emails, application names, LDAP/X.509 names) are
-  replaced everywhere, in values, keys and file names, with the same
+- Values the tool discovers (hosts, IPs, databases, collections, index names,
+  users, replica sets, shards, paths, emails, application names, LDAP/X.509
+  names) are replaced everywhere, in values, keys and file names, with the same
   replacement in every file. Keys are field names and stay, except host:port
   and path keys (users, databases and collections inside a path are mapped
   too), keys equal to a database name, `<db>.<collection>` keys, and
@@ -241,8 +241,8 @@ Replacements made by the mapping, system and default MongoDB paths, JDK and
 vendor names are left alone.
 
 Every string inside a command is replaced unless its key is on a short list
-of values needed for diagnosis: collection, database and user names (which are
-mapped), index names, enum-like options (`readConcern.level`, `w`, `mode`,
+of values needed for diagnosis: collection, database, user and index names
+(which are mapped), enum-like options (`readConcern.level`, `w`, `mode`,
 collation, `verbosity`, ...), mongos client metadata and Extended JSON type
 wrappers (`$uuid`, `$oid`, `$numberLong`, ...). `comment` and any other key
 carrying application input are replaced.
@@ -263,6 +263,16 @@ pools, listener sockets) are mapped like values. Lines with a syslog/journald,
 `kubectl --timestamps` or `docker logs` prefix are parsed as JSON; the prefix is
 mapped as text. X.509 subjects are replaced whole, and LDAP `dc=`, `o=`, `cn=`
 and `uid=` values are mapped.
+
+Index names are mapped whole to `indexN`: names such as `uq_<collection>_date`
+embed collection names and business terms. They are taken from `index`,
+`indexName`, `hint`, `indexesBuilt`, the `name` of index specs (`indexes`,
+`properties`, `spec`) and E11000 and index error messages, and replaced
+wherever they appear. The same name on two collections gets the same `indexN`;
+the namespace on the same line (`ns`, `namespace`, `collection:`) tells which
+collection an index belongs to. `_id_` and `*` stay, and key patterns stay
+readable (`planSummary: IXSCAN { email: 1 }`, `key`), also when an index is
+named after a field.
 
 The organization name inside customer domains is replaced on its own too: the
 label before the public suffix (`acme` of `db1.acme.com` or `acme.co.uk`)

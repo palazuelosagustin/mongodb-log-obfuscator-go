@@ -6,6 +6,12 @@ README.
 
 ## Unreleased
 
+- Index names are mapped whole to `indexN` wherever they appear (index
+  fields, index specs, `indexesBuilt`, `hint`, E11000 and index error
+  messages). Names such as `uq_<collection>_date` kept collection names and
+  business terms. `_id_` stays; `planSummary` keeps its key pattern even when
+  an index is named after a field; `verify` reports index names left.
+
 - UUIDs are kept whole. About 1 in 10,000 had all-digit groups that passed
   the card-number check and were partly rewritten to `obfuscated-number`,
   which broke correlation by connection, collection or index build UUID.

@@ -509,7 +509,11 @@ func obfuscateFTDCDocument(doc bson.D, matcher *obfuscator) (bson.D, int, bool) 
 // JSON/BSON keys (hosts, IPs and paths only), names to output file names.
 type obfuscator struct {
 	values *replace.Matcher
-	keys   *replace.Matcher
+	// plans is values without index names, for planSummary: it holds key
+	// patterns ("IXSCAN { email: 1 }"), and an index may be named after a
+	// field.
+	plans *replace.Matcher
+	keys  *replace.Matcher
 	// pathKeys also maps user, database and collection names, for keys that
 	// are paths (/run/user/<uid>, /data/<db>/...).
 	pathKeys *replace.Matcher
@@ -528,8 +532,15 @@ func newObfuscator(reg *registry.Registry) *obfuscator {
 		values = append(values, r.Value)
 	}
 	pathCats := append(append([]string{}, registry.NetworkAndPathCategories...), "user", "database", "collection")
+	plans := make([]registry.Replacement, 0, len(reps))
+	for _, r := range reps {
+		if _, isIndex := reg.Categories["index"][r.Original]; !isIndex {
+			plans = append(plans, r)
+		}
+	}
 	return &obfuscator{
 		values:      replace.New(reps),
+		plans:       replace.New(plans),
 		keys:        replace.New(reg.ReplacementsFor(registry.NetworkAndPathCategories...)),
 		pathKeys:    replace.New(reg.ReplacementsFor(pathCats...)),
 		databases:   replacementMap(reg.ReplacementsFor("database")),
@@ -551,7 +562,11 @@ func replacementMap(reps []registry.Replacement) map[string]string {
 func (o *obfuscator) text(s string) (string, int) { return o.textKey(s, "") }
 
 func (o *obfuscator) textKey(s, key string) (string, int) {
-	mapped, n := redact.ScrubText(o.values.Apply(s))
+	values := o.values
+	if key == "planSummary" && o.plans != nil {
+		values = o.plans
+	}
+	mapped, n := redact.ScrubText(values.Apply(s))
 	out, m := o.net.Apply(key, mapped)
 	return out, n + m
 }

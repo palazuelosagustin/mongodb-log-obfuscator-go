@@ -96,9 +96,12 @@ too.
   (`oplog.rs`, `pbmBackups`), tool application names (`pbm-agent`,
   `mongodb_exporter`, `mongosh`), `__system`, JDK and framework classes,
   field names, operators, plan summaries, query shape hashes, metrics.
-- **Replaced inside commands:** every string except collection, database and
-  user names (mapped), index names and enum-like options (`readConcern.level`,
+- **Replaced inside commands:** every string except collection, database,
+  user and index names (mapped) and enum-like options (`readConcern.level`,
   `w`, `mode`). `comment` is replaced.
+- **Index names** become `indexN` everywhere (they embed collection names);
+  `_id_` stays. Tie an index to its collection by the namespace on the same
+  line: the same name on two collections gets the same `indexN`.
 - **Pipelines:** `$match` is redacted; other stages keep field references
   (`"$amount"`), numbers and `$lookup` field names; their collections are
   mapped.

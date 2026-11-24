@@ -75,7 +75,7 @@ func TestRunRemovesKnownLeaks(t *testing.T) {
 		}
 	}
 	// diagnostic values are kept
-	for _, want := range []string{`"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"`, `"level":"majority"`, `"planSummary":"IXSCAN { name: 1 }"`, `"keyPattern":{"phone":1}`, `index: phone_1 dup key: { phone: \"obfuscated string\" }`, `"op":"u"`, `"diff":{"u":{"firstName":"obfuscated string","balance":0}}`, `mongod[1]: {"t"`} {
+	for _, want := range []string{`"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"`, `"level":"majority"`, `"planSummary":"IXSCAN { name: 1 }"`, `"keyPattern":{"phone":1}`, `index: index1 dup key: { phone: \"obfuscated string\" }`, `"op":"u"`, `"diff":{"u":{"firstName":"obfuscated string","balance":0}}`, `mongod[1]: {"t"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lost %s", want)
 		}
@@ -213,6 +213,75 @@ func TestRunReplacesDomainOrgLabels(t *testing.T) {
 	org := reg.Categories["org"]["secretcorp"]
 	// the application name is mapped whole; the org rule covers free text
 	for _, want := range []string{`"application":{"name":"app1"}`, "agent-" + org + "_1-1-prod disconnected", org + "_reports job for " + org + "-EU", ".mongodb.net:50001"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lacks %s:\n%s", want, text)
+		}
+	}
+	report, err := verify.Dir(out, verify.Options{Mapping: reg.Report()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 0 {
+		t.Errorf("verify found %v", report.Counts)
+	}
+}
+
+// Index names are mapped whole to indexN wherever they appear: they embed
+// collection names and business terms. planSummary keeps its key pattern
+// even when an index is named after a field; "_id_" and "*" stay.
+func TestRunMapsIndexNames(t *testing.T) {
+	lines := []string{
+		`{"t":{"$date":"2026-11-01T10:00:00.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn1","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"createIndexes":"secret_orders","indexes":[{"key":{"date":1},"name":"uq_secret_orders_date","unique":true},{"key":{"email":1},"name":"email"}],"$db":"shop"},"durationMillis":1500}}`,
+		`{"t":{"$date":"2026-11-01T10:00:01.000Z"},"s":"I","c":"INDEX","id":20384,"ctx":"IndexBuildsCoordinatorMongod-0","msg":"Index build: starting","attr":{"buildUUID":{"uuid":{"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"}},"namespace":"shop.secret_orders","properties":{"v":2,"key":{"date":1},"name":"uq_secret_orders_date","unique":true},"method":"Hybrid"}}`,
+		`{"t":{"$date":"2026-11-01T10:00:02.000Z"},"s":"I","c":"INDEX","id":20663,"ctx":"IndexBuildsCoordinatorMongod-0","msg":"Index build: completed successfully","attr":{"buildUUID":{"uuid":{"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"}},"namespace":"shop.secret_orders","indexesBuilt":["uq_secret_orders_date","email"],"numIndexesBefore":1,"numIndexesAfter":3}}`,
+		`{"t":{"$date":"2026-11-01T10:00:03.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn2","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"find":"secret_orders","filter":{"email":"x@y.z"},"hint":"email","$db":"shop"},"planSummary":"IXSCAN { email: 1 }","durationMillis":150}}`,
+		`{"t":{"$date":"2026-11-01T10:00:04.000Z"},"s":"W","c":"QUERY","id":20526,"ctx":"conn3","msg":"Failed","attr":{"error":{"code":11000,"errmsg":"E11000 duplicate key error collection: shop.secret_orders index: uq_secret_orders_date dup key: { date: 5 }"}}}`,
+		`{"t":{"$date":"2026-11-01T10:00:05.000Z"},"s":"I","c":"STORAGE","id":22206,"ctx":"conn4","msg":"Deferring table drop for index","attr":{"index":"ix_secret_calendar_week","namespace":"shop.secret_orders"}}`,
+		`{"t":{"$date":"2026-11-01T10:00:06.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn5","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"dropIndexes":"secret_orders","index":["ix_secret_calendar_week","_id_"],"$db":"shop"},"durationMillis":150}}`,
+		`{"t":{"$date":"2026-11-01T10:00:07.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn6","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"dropIndexes":"secret_orders","index":"*","$db":"shop"},"durationMillis":150}}`,
+		`{"t":{"$date":"2026-11-01T10:00:08.000Z"},"s":"I","c":"NETWORK","id":51800,"ctx":"conn7","msg":"client metadata","attr":{"remote":"10.1.2.3:50000","doc":{"driver":{"name":"nodejs","version":"6.3.0"},"application":{"name":"mongosh 2.3.1"}}}}`,
+	}
+	root := t.TempDir()
+	in := filepath.Join(root, "in", "mongod.log")
+	if err := os.MkdirAll(filepath.Dir(in), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New()
+	out := filepath.Join(root, "out")
+	summary, err := Run(Config{Files: []inputs.File{{Path: in, Type: inputs.Log}}, InputRoot: filepath.Dir(in), OutputRoot: out, MappingPath: filepath.Join(root, "out_mapping.json"), Jobs: 1, Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := reg.Categories["index"]
+	if len(idx) != 3 || idx["uq_secret_orders_date"] == "" || idx["email"] == "" || idx["ix_secret_calendar_week"] == "" {
+		t.Fatalf("index names = %v", idx)
+	}
+	data, err := os.ReadFile(summary.Outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "secret") {
+		t.Errorf("index or collection name remains:\n%s", text)
+	}
+	uq, email, ix := idx["uq_secret_orders_date"], idx["email"], idx["ix_secret_calendar_week"]
+	for _, want := range []string{
+		`"name":"` + uq + `","unique":true`,                        // createIndexes
+		`"properties":{"v":2,"key":{"date":1},"name":"` + uq + `"`, // build starting
+		`"indexesBuilt":["` + uq + `","` + email + `"]`,            // build completed
+		`"hint":"` + email + `"`,
+		`"planSummary":"IXSCAN { email: 1 }"`, // key pattern kept
+		`"key":{"email":1}`,
+		`index: ` + uq + ` dup key`,
+		`"index":"` + ix + `"`,
+		`"index":["` + ix + `","_id_"]`,
+		`"index":"*"`,
+		`"driver":{"name":"nodejs"`,
+		`"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"`,
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %s:\n%s", want, text)
 		}
