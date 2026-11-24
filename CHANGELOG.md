@@ -6,6 +6,13 @@ README.
 
 ## Unreleased
 
+- Organization names that differ only in case ("Cisco" from a certificate,
+  "cisco" from an LDAP `dc=`) get one `OrganizationN`; the label matches
+  both in any case. Public certificate authorities (IdenTrust, DigiCert,
+  Let's Encrypt, Sectigo…) are not taken as organization names. WiredTiger
+  idents such as `table:<db>/index-12-345` are not taken as index names:
+  their database is mapped and the rest kept.
+
 - Command oplog entries (`op: "c"`) are handled like commands: their
   collection and index names are mapped, and key patterns and UUIDs kept.
   Before, `o` was redacted like a user document, so a replicated

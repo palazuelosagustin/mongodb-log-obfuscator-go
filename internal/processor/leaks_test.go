@@ -240,6 +240,7 @@ func TestRunMapsIndexNames(t *testing.T) {
 		`{"t":{"$date":"2026-11-01T10:00:06.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn5","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"dropIndexes":"secret_orders","index":["ix_secret_calendar_week","_id_"],"$db":"shop"},"durationMillis":150}}`,
 		`{"t":{"$date":"2026-11-01T10:00:07.000Z"},"s":"I","c":"COMMAND","id":51803,"ctx":"conn6","msg":"Slow query","attr":{"type":"command","ns":"shop.secret_orders","command":{"dropIndexes":"secret_orders","index":"*","$db":"shop"},"durationMillis":150}}`,
 		`{"t":{"$date":"2026-11-01T10:00:08.000Z"},"s":"I","c":"NETWORK","id":51800,"ctx":"conn7","msg":"client metadata","attr":{"remote":"10.1.2.3:50000","doc":{"driver":{"name":"nodejs","version":"6.3.0"},"application":{"name":"mongosh 2.3.1"}}}}`,
+		`{"t":{"$date":"2026-11-01T10:00:09.000Z"},"s":"I","c":"STORAGE","id":22206,"ctx":"conn8","msg":"Deferring table drop for index","attr":{"index":"table:shop/index-668-1088031287014458695","namespace":"shop.secret_orders"}}`,
 	}
 	root := t.TempDir()
 	in := filepath.Join(root, "in", "mongod.log")
@@ -266,6 +267,9 @@ func TestRunMapsIndexNames(t *testing.T) {
 	text := string(data)
 	if strings.Contains(text, "secret") {
 		t.Errorf("index or collection name remains:\n%s", text)
+	}
+	if !strings.Contains(text, "/index-668-1088031287014458695") {
+		t.Errorf("WiredTiger ident was mapped as an index name:\n%s", text)
 	}
 	uq, email, ix := idx["uq_secret_orders_date"], idx["email"], idx["ix_secret_calendar_week"]
 	for _, want := range []string{

@@ -105,6 +105,9 @@ func (r *Registry) MergeCollectors(collectors []*Collector) {
 		}
 		sort.Strings(sorted)
 		for _, value := range sorted {
+			if cat == "org" && (PublicCA(value) || OrgLabel(value) && r.hasOrgFold(value)) {
+				continue // "cisco" after "Cisco": the label matches it in any case
+			}
 			r.GetOrCreate(cat, value)
 		}
 	}
@@ -167,6 +170,39 @@ var genericLabels = map[string]bool{
 	"docker": true, "kubernetes": true, "oracle": true, "vmware": true, "digitalocean": true, "heroku": true,
 }
 
+// Public certificate authorities: they appear in certificate issuers and in
+// OCSP and CRL URLs of every customer, so they are not organization names.
+var publicCAs = map[string]bool{
+	"identrust": true, "digicert": true, "letsencrypt": true, "isrg": true, "internetsecurityresearchgroup": true,
+	"sectigo": true, "comodo": true, "comodoca": true, "usertrust": true, "globalsign": true, "entrust": true,
+	"godaddy": true, "starfield": true, "geotrust": true, "thawte": true, "verisign": true, "symantec": true,
+	"rapidssl": true, "baltimore": true, "cybertrust": true, "quovadis": true, "certum": true, "buypass": true,
+	"actalis": true, "harica": true, "zerossl": true, "sslcom": true, "trustwave": true, "networksolutions": true,
+	"pkioverheid": true, "swisssign": true, "telesec": true, "secom": true,
+}
+
+// PublicCA reports whether an organization name is a public certificate
+// authority ("IdenTrust", "DigiCert Inc", "Let's Encrypt"): its letters, or
+// those of its first word, lower-cased, name one.
+func PublicCA(name string) bool {
+	var all, first strings.Builder
+	inFirst := true
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			all.WriteRune(r)
+			if inFirst {
+				first.WriteRune(r)
+			}
+		case r == ' ' || r == ',':
+			if first.Len() > 0 {
+				inFirst = false
+			}
+		}
+	}
+	return publicCAs[all.String()] || publicCAs[first.String()]
+}
+
 // orgLabelOf returns the organization label of a host or domain name: the
 // label before the public suffix, lower case, when it has 4 or more letters
 // only and is not a generic or vendor word. Otherwise "".
@@ -183,7 +219,7 @@ func orgLabelOf(name string) string {
 	if keptSuffix(strings.Join(labels[i:], ".")) {
 		return ""
 	}
-	if label := labels[i]; OrgLabel(label) && !genericLabels[label] {
+	if label := labels[i]; OrgLabel(label) && !genericLabels[label] && !publicCAs[label] {
 		return label
 	}
 	return ""

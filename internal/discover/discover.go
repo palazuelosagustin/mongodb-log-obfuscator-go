@@ -568,11 +568,16 @@ func (s *Scanner) discoverIndexNames(key string, val any) {
 	}
 }
 
+// registerIndex registers an index name. WiredTiger idents
+// ("table:db/index-12-345", "index-12-345") are storage file names, not index
+// names: their database part is mapped like any namespace.
 func (s *Scanner) registerIndex(name string) {
-	if name != "" && name != "_id_" && name != "*" && !strings.HasPrefix(name, "$") {
+	if name != "" && name != "_id_" && name != "*" && !strings.HasPrefix(name, "$") && !strings.ContainsAny(name, ":/") && !reWTIdent.MatchString(name) {
 		s.register("index", name)
 	}
 }
+
+var reWTIdent = regexp.MustCompile(`^(index|collection)-\d+-\d+$`)
 
 // Index names in server error messages: E11000 duplicate key errors, and
 // dropIndexes and createIndexes failures.
