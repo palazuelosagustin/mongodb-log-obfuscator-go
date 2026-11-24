@@ -6,6 +6,8 @@ README.
 
 ## Unreleased
 
+## v0.2.0 - 2026-11-24
+
 - Organization names that differ only in case ("Cisco" from a certificate,
   "cisco" from an LDAP `dc=`) get one `OrganizationN`; the label matches
   both in any case. Public certificate authorities (IdenTrust, DigiCert,
