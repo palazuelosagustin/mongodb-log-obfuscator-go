@@ -158,7 +158,7 @@ var hostKeys = set("host", "hostAndPort", "hostName", "syncSource", "syncSourceH
 var remoteLocalKeys = set("remote", "local", "remoteAddr", "remoteSocketAddress", "remoteString", "remoteAddress", "sourceClient", "clientIP", "clientIp", "client", "ip")
 var namespaceKeys = set("ns", "namespace", "nss", "sourceNss", "targetNss", "newNss", "oldNss", "sourceNamespace", "targetNamespace", "destinationNamespace", "affectedNamespaces")
 var databaseKeys = set("database", "db", "dbName", "dbname", "$db", "authenticationDatabase", "authdb")
-var collectionKeys = set("collection", "coll", "collName", "find", "aggregate", "insert", "update", "delete", "findAndModify", "count", "distinct", "create", "drop", "createIndexes", "dropIndexes", "collMod")
+var collectionKeys = set("collection", "coll", "collName", "find", "aggregate", "insert", "update", "delete", "findAndModify", "count", "distinct", "create", "drop", "createIndexes", "dropIndexes", "collMod", "startIndexBuild", "commitIndexBuild", "abortIndexBuild")
 var replsetKeys = set("replSetName", "setName", "replicaSet", "set")
 var userKeys = set("user", "userName", "queryUser", "principalName", "authenticatedUser")
 var pathKeys = set("dbPath", "path", "filePath", "filepath", "configPath", "logPath", "file", "fileName", "dir", "directory", "pidFilePath", "auditPath", "sslPEMKeyFile", "tlsCertificateKeyFile", "tlsCAFile", "sslCAFile", "keyFile", "executablePath")
@@ -589,6 +589,18 @@ func (s *Scanner) discoverIndexText(text string) {
 	}
 }
 
+// discoverOplogCommand reads the "o" of a command oplog entry (op "c") like
+// a command; deepDiscover skips "o" as a user document otherwise. The
+// createIndexes entry is the index spec itself, so its "name" is an index.
+func (s *Scanner) discoverOplogCommand(cmd map[string]any, depth int) {
+	s.deepDiscover(cmd, depth+1, true)
+	if _, ok := cmd["createIndexes"].(string); ok {
+		if name, ok := cmd["name"].(string); ok {
+			s.registerIndex(name)
+		}
+	}
+}
+
 // bsonToAny converts the top two levels of a BSON value to the JSON shapes
 // discoverIndexNames reads.
 func bsonToAny(v any) any {
@@ -619,6 +631,9 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 	}
 	switch v := obj.(type) {
 	case map[string]any:
+		if cmd, ok := v["o"].(map[string]any); ok && redact.OplogCommand(v["op"]) {
+			s.discoverOplogCommand(cmd, depth)
+		}
 		for key, val := range v {
 			if strings.ContainsAny(key, ":/") {
 				s.discoverKey(key)

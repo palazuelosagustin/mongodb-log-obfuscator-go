@@ -36,6 +36,9 @@ var documentContainerKeys = set("o", "o2", "document", "documentKey", "fullDocum
 var commandSafeStringKeys = set(
 	// collection and database names (mapped)
 	"find", "aggregate", "count", "distinct", "insert", "update", "delete", "findAndModify", "getMore", "create", "drop", "createIndexes", "dropIndexes", "collMod", "renameCollection", "to", "mapReduce", "listIndexes", "killCursors", "collection", "coll", "ns", "$db", "dbName", "viewOn", "db", "user",
+	// command oplog entries (op "c"): index builds, and the op type of the
+	// entries of applyOps (i, u, d, c, n)
+	"startIndexBuild", "commitIndexBuild", "abortIndexBuild", "op",
 	// options and enums
 	"key", "name", "index", "hint", "mode", "level", "w", "verbosity", "locale", "caseFirst", "alternate", "maxVariable", "provenance", "apiVersion", "commitQuorum", "validationLevel", "validationAction", "timeField", "metaField", "granularity", "compression", "readPreference", "mechanism",
 	// mongos client metadata
@@ -43,6 +46,14 @@ var commandSafeStringKeys = set(
 	// Extended JSON type wrappers
 	"$uuid", "$oid", "$date", "$numberLong", "$numberInt", "$numberDouble", "$numberDecimal", "base64", "subType",
 )
+
+// OplogCommand reports whether an oplog entry's op is "c": its "o" is a
+// command (createIndexes, startIndexBuild, create, collMod, ...), not a user
+// document, and is handled like one.
+func OplogCommand(op any) bool {
+	s, ok := op.(string)
+	return ok && s == "c"
+}
 
 // DocumentContainer reports keys whose values are user documents in any
 // context.

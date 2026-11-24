@@ -257,7 +257,12 @@ other string is replaced.
 User documents are redacted wherever they appear, not only in commands:
 replicated operations (`o`, `o2` in "Applied op" lines), duplicate-key values
 (`keyValue` and the `dup key: { ... }` text of error messages), change-stream
-images (`fullDocument`, `updateDescription`, ...). Card numbers in any free
+images (`fullDocument`, `updateDescription`, ...). The `o` of a command oplog
+entry (`op: "c"`: `createIndexes`, `startIndexBuild`, `create`, `collMod`,
+`applyOps`, ...) is a command, not a document, and is handled like one:
+collection and index names are mapped, key patterns and UUIDs kept, and
+filters, validators, view pipelines and the documents inside `applyOps` are
+redacted. Card numbers in any free
 text are replaced. Host, IP and path keys (topology descriptions, connection
 pools, listener sockets) are mapped like values. Lines with a syslog/journald,
 `kubectl --timestamps` or `docker logs` prefix are parsed as JSON; the prefix is

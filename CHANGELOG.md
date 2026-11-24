@@ -6,6 +6,13 @@ README.
 
 ## Unreleased
 
+- Command oplog entries (`op: "c"`) are handled like commands: their
+  collection and index names are mapped, and key patterns and UUIDs kept.
+  Before, `o` was redacted like a user document, so a replicated
+  `createIndexes` or `startIndexBuild` lost its collection, index name,
+  key pattern and build UUID. Filters, validators, view pipelines and the
+  documents inside `applyOps` are still redacted.
+
 - Index names are mapped whole to `indexN` wherever they appear (index
   fields, index specs, `indexesBuilt`, `hint`, E11000 and index error
   messages). Names such as `uq_<collection>_date` kept collection names and

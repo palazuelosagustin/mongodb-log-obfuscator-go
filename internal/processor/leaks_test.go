@@ -294,3 +294,67 @@ func TestRunMapsIndexNames(t *testing.T) {
 		t.Errorf("verify found %v", report.Counts)
 	}
 }
+
+// The "o" of a command oplog entry (op "c") is a command: names are mapped,
+// key patterns and UUIDs kept, and the values it carries (filters,
+// validators, view pipelines, documents of applyOps) still redacted.
+func TestRunMapsOplogCommandEntries(t *testing.T) {
+	applied := func(entry string) string {
+		return `{"t":{"$date":"2026-11-01T10:00:00.000Z"},"s":"I","c":"REPL","id":21360,"ctx":"ReplWriterWorker-1","msg":"applied op","attr":{"oplogEntry":` + entry + `,"durationMillis":0}}`
+	}
+	lines := []string{
+		applied(`{"op":"c","ns":"shop.$cmd","ui":{"$uuid":"4169e03a-f3e2-4119-9a6b-fcb879416c81"},"o":{"createIndexes":"secret_orders","v":2,"key":{"date":1},"name":"uq_secret_orders_date","unique":true,"partialFilterExpression":{"status":"SECRETactive"}},"ts":{"$timestamp":{"t":1,"i":1}}}`),
+		applied(`{"op":"c","ns":"shop.$cmd","o":{"startIndexBuild":"secret_orders","indexBuildUUID":{"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"},"indexes":[{"v":2,"key":{"date":1},"name":"uq_secret_orders_date"}]},"ts":{"$timestamp":{"t":1,"i":2}}}`),
+		applied(`{"op":"c","ns":"shop.$cmd","o":{"commitIndexBuild":"secret_orders","indexBuildUUID":{"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"},"indexes":[{"v":2,"key":{"date":1},"name":"uq_secret_orders_date"}]},"ts":{"$timestamp":{"t":1,"i":3}}}`),
+		applied(`{"op":"c","ns":"shop.$cmd","o":{"create":"secret_view","viewOn":"secret_orders","pipeline":[{"$match":{"owner":"SECRETbob"}}]},"ts":{"$timestamp":{"t":1,"i":4}}}`),
+		applied(`{"op":"c","ns":"shop.$cmd","o":{"collMod":"secret_orders","validator":{"$jsonSchema":{"properties":{"tier":{"enum":["SECRETgold"]}}}}},"ts":{"$timestamp":{"t":1,"i":5}}}`),
+		applied(`{"op":"c","ns":"admin.$cmd","o":{"applyOps":[{"op":"i","ns":"shop.secret_orders","o":{"_id":1,"owner":"SECRETalice"}}]},"ts":{"$timestamp":{"t":1,"i":6}}}`),
+		applied(`{"op":"u","ns":"shop.secret_orders","o":{"$v":2,"diff":{"u":{"owner":"SECRETcarol"}}},"o2":{"_id":"SECRET42"},"ts":{"$timestamp":{"t":1,"i":7}}}`),
+	}
+	root := t.TempDir()
+	in := filepath.Join(root, "in", "mongod.log")
+	if err := os.MkdirAll(filepath.Dir(in), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New()
+	out := filepath.Join(root, "out")
+	summary, err := Run(Config{Files: []inputs.File{{Path: in, Type: inputs.Log}}, InputRoot: filepath.Dir(in), OutputRoot: out, MappingPath: filepath.Join(root, "out_mapping.json"), Jobs: 1, Registry: reg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(summary.Outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(strings.ToLower(text), "secret") {
+		t.Errorf("name or value remains:\n%s", text)
+	}
+	coll, view, idx := reg.Categories["collection"]["secret_orders"], reg.Categories["collection"]["secret_view"], reg.Categories["index"]["uq_secret_orders_date"]
+	if coll == "" || view == "" || idx == "" {
+		t.Fatalf("not discovered: collection %v, index %v", reg.Categories["collection"], reg.Categories["index"])
+	}
+	for _, want := range []string{
+		`"o":{"createIndexes":"` + coll + `","v":2,"key":{"date":1},"name":"` + idx + `","unique":true,"partialFilterExpression":{"status":"obfuscated string"}}`,
+		`"o":{"startIndexBuild":"` + coll + `","indexBuildUUID":{"$uuid":"3169e03a-f3e2-4119-9a6b-fcb879416c81"},"indexes":[{"v":2,"key":{"date":1},"name":"` + idx + `"}]}`,
+		`"o":{"commitIndexBuild":"` + coll + `"`,
+		`"o":{"create":"` + view + `","viewOn":"` + coll + `","pipeline":[{"$match":{"owner":"obfuscated string"}}]}`,
+		`"o":{"applyOps":[{"op":"i","ns":"database1.` + coll + `","o":{"_id":0,"owner":"obfuscated string"}}]}`,
+		`"o":{"$v":0,"diff":{"u":{"owner":"obfuscated string"}}},"o2":{"_id":"obfuscated string"}`, // data entries stay fully redacted
+		`"ui":{"$uuid":"4169e03a-f3e2-4119-9a6b-fcb879416c81"}`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lacks %s:\n%s", want, text)
+		}
+	}
+	report, err := verify.Dir(out, verify.Options{Mapping: reg.Report()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Total != 0 {
+		t.Errorf("verify found %v", report.Counts)
+	}
+}

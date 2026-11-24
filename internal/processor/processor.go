@@ -746,8 +746,21 @@ func (o *obfuscator) json(v any, key string, inCommand bool) (any, int) {
 	case jsonObject:
 		out := make(jsonObject, len(x))
 		total := 0
+		commandOp := false
+		for _, member := range x {
+			if member.key == "op" {
+				commandOp = redact.OplogCommand(member.value)
+			}
+		}
 		for i, member := range x {
 			out[i].key = o.key(member.key, key)
+			if commandOp && member.key == "o" {
+				// a command oplog entry: map names, redact its payloads
+				repl, n := o.json(member.value, member.key, true)
+				out[i].value = repl
+				total += n
+				continue
+			}
 			child := inCommand || redact.CommandContext(member.key)
 			if child && member.key == "pipeline" {
 				repl, n := o.pipelineJSON(member.value)
