@@ -164,6 +164,9 @@ var userKeys = set("user", "userName", "queryUser", "principalName", "authentica
 var pathKeys = set("dbPath", "path", "filePath", "filepath", "configPath", "logPath", "file", "fileName", "dir", "directory", "pidFilePath", "auditPath", "sslPEMKeyFile", "tlsCertificateKeyFile", "tlsCAFile", "sslCAFile", "keyFile", "executablePath")
 var connStringKeys = set("connString", "connectionString", "uri", "mongoUri", "ldapurl")
 var shardKeys = set("shard", "shardId", "fromShard", "toShard", "donorShardId", "recipientShardId")
+
+// Client metadata also carries the name as {"application": {"name": ...}};
+// deepDiscover registers that one, since "name" alone has no category.
 var appNameKeys = set("appName", "clientName", "serviceName", "processName")
 
 // X.509 subject and issuer names: replaced whole, they name the organisation,
@@ -548,6 +551,13 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 				continue
 			}
 			s.discoverValue(key, val)
+			if key == "application" {
+				if app, ok := val.(map[string]any); ok {
+					if name, ok := app["name"].(string); ok {
+						s.discoverValue("appName", name)
+					}
+				}
+			}
 			switch val.(type) {
 			case map[string]any, []any:
 				s.deepDiscover(val, depth+1, child)
@@ -688,6 +698,13 @@ func (s *Scanner) deepDiscoverBSON(doc bson.D, depth int, inCommand bool) {
 			}
 			s.discoverValue(elem.Key, v)
 		case bson.D:
+			if elem.Key == "application" {
+				for _, f := range v {
+					if name, ok := f.Value.(string); ok && f.Key == "name" {
+						s.discoverValue("appName", name)
+					}
+				}
+			}
 			s.deepDiscoverBSON(v, depth+1, child)
 		case bson.A:
 			s.discoverBSONList(elem.Key, v, depth+1, child)
