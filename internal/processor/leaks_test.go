@@ -135,3 +135,42 @@ func TestRunKeepsUUIDs(t *testing.T) {
 		t.Errorf("card number remains in output:\n%s", text)
 	}
 }
+
+// Application names reported only in client metadata are mapped too; known
+// tools keep their names.
+func TestRunMapsClientMetadataAppNames(t *testing.T) {
+	meta := func(conn, app string) string {
+		return `{"t":{"$date":"2026-11-01T10:00:00.000Z"},"s":"I","c":"NETWORK","id":51800,"ctx":"` + conn + `","msg":"client metadata","attr":{"remote":"10.1.2.3:50000","client":"` + conn + `","doc":{"driver":{"name":"nodejs","version":"6.3.0"},"os":{"type":"Linux"},"application":{"name":"` + app + `"}}}}`
+	}
+	lines := []string{
+		meta("conn1", "appd-mongo-dbagent-SECRETorg1-1-prod"),
+		meta("conn2", "SECRET-orders-api"),
+		meta("conn3", "mongosh 2.3.1"),
+		meta("conn4", "pbm-agent"),
+	}
+	root := t.TempDir()
+	in := filepath.Join(root, "in", "mongod.log")
+	if err := os.MkdirAll(filepath.Dir(in), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := Run(Config{Files: []inputs.File{{Path: in, Type: inputs.Log}}, InputRoot: filepath.Dir(in), OutputRoot: filepath.Join(root, "out"), MappingPath: filepath.Join(root, "out_mapping.json"), Jobs: 1, Registry: registry.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(summary.Outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "SECRET") {
+		t.Errorf("application name remains in output:\n%s", text)
+	}
+	for _, want := range []string{`"application":{"name":"app1"}`, `"application":{"name":"app2"}`, `"application":{"name":"mongosh 2.3.1"}`, `"application":{"name":"pbm-agent"}`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lacks %s:\n%s", want, text)
+		}
+	}
+}

@@ -11,6 +11,11 @@ README.
   which broke correlation by connection, collection or index build UUID.
   `verify` no longer reports such a UUID as a card number.
 
+- Application names in client metadata (`doc.application.name`) are mapped
+  to `appN`. Before, a name was only mapped when it also appeared as
+  `appName` in a slow query, so clients whose operations were never slow,
+  such as monitoring agents, kept their real names.
+
 ## v0.1.1 - 2026-11-09
 
 - Database and collection names used as keys are mapped: documents that
