@@ -14,6 +14,10 @@ import (
 type Replacement struct {
 	Original string
 	Value    string
+	// Label marks an organization name matched as a word in any case,
+	// also next to digits, "_" and "-": "acme" in "ACME_reports" and
+	// "agent-acme1-prod" (see OrgLabel).
+	Label bool
 }
 
 type Registry struct {
@@ -104,6 +108,101 @@ func (r *Registry) MergeCollectors(collectors []*Collector) {
 			r.GetOrCreate(cat, value)
 		}
 	}
+	for _, label := range r.DomainOrgLabels() {
+		if r.categoryOf(label) == "" && !r.hasOrgFold(label) {
+			r.GetOrCreate("org", label)
+		}
+	}
+}
+
+// hasOrgFold reports an org name equal to label in any case ("Acme" from an
+// LDAP name), so one organization keeps one replacement.
+func (r *Registry) hasOrgFold(label string) bool {
+	for original := range r.Categories["org"] {
+		if strings.EqualFold(original, label) {
+			return true
+		}
+	}
+	return false
+}
+
+// DomainOrgLabels returns the organization labels of the mapped host and
+// domain names ("acme" of db1.acme.com and acme.co.uk), sorted. Labels that
+// are mapped in another category, such as a host named "acme", are left out
+// of the org category by MergeCollectors.
+func (r *Registry) DomainOrgLabels() []string {
+	set := map[string]bool{}
+	for _, cat := range []string{"fqdn", "domain"} {
+		for name := range r.Categories[cat] {
+			if label := orgLabelOf(name); label != "" {
+				set[label] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for label := range set {
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Two-letter second-level labels under a country code (acme.co.uk,
+// acme.com.au): the organization label is the one before them.
+var countrySecondLevel = map[string]bool{"co": true, "com": true, "net": true, "org": true, "gov": true, "edu": true, "ac": true, "ne": true, "or": true, "go": true}
+
+// Labels that name a platform, vendor or role rather than a customer, and
+// words too common in logs to replace everywhere.
+var genericLabels = map[string]bool{
+	"corp": true, "prod": true, "production": true, "internal": true, "local": true, "localdomain": true, "localhost": true,
+	"cloud": true, "example": true, "domain": true, "cluster": true, "server": true, "servers": true, "host": true, "hosts": true,
+	"test": true, "testing": true, "stage": true, "staging": true, "devel": true, "develop": true, "development": true,
+	"intra": true, "intranet": true, "company": true, "group": true, "global": true, "online": true, "service": true, "services": true,
+	"admin": true, "backup": true, "primary": true, "secondary": true, "replica": true, "shard": true, "config": true,
+	"database": true, "data": true, "mail": true, "email": true, "home": true, "office": true, "site": true, "network": true,
+	"private": true, "public": true, "default": true, "compute": true, "region": true, "zone": true,
+	"mongo": true, "mongodb": true, "percona": true, "atlas": true, "amazon": true, "amazonaws": true, "aws": true,
+	"google": true, "googleapis": true, "azure": true, "windows": true, "microsoft": true, "cloudapp": true,
+	"github": true, "gitlab": true, "redhat": true, "ubuntu": true, "debian": true, "centos": true, "fedoraproject": true,
+	"docker": true, "kubernetes": true, "oracle": true, "vmware": true, "digitalocean": true, "heroku": true,
+}
+
+// orgLabelOf returns the organization label of a host or domain name: the
+// label before the public suffix, lower case, when it has 4 or more letters
+// only and is not a generic or vendor word. Otherwise "".
+func orgLabelOf(name string) string {
+	labels := strings.Split(strings.ToLower(strings.TrimSuffix(name, ".")), ".")
+	n := len(labels)
+	if n < 2 {
+		return ""
+	}
+	i := n - 2
+	if n >= 3 && len(labels[n-1]) == 2 && countrySecondLevel[labels[n-2]] {
+		i = n - 3
+	}
+	if keptSuffix(strings.Join(labels[i:], ".")) {
+		return ""
+	}
+	if label := labels[i]; OrgLabel(label) && !genericLabels[label] {
+		return label
+	}
+	return ""
+}
+
+// OrgLabel reports whether an org-category original is matched as a label
+// (see Replacement.Label): 4 or more ASCII letters. Shorter or other org
+// names, such as "SecretCorp Inc" of a certificate, match exactly.
+func OrgLabel(original string) bool {
+	if len(original) < 4 {
+		return false
+	}
+	for i := 0; i < len(original); i++ {
+		c := original[i] | 0x20
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // categoryOf returns the category value is mapped in, or "".
@@ -334,7 +433,7 @@ func (r *Registry) ReplacementsFor(cats ...string) []Replacement {
 			}
 			seen[original] = true
 			if want[cat] {
-				out = append(out, Replacement{Original: original, Value: replacement})
+				out = append(out, Replacement{Original: original, Value: replacement, Label: cat == "org" && OrgLabel(original)})
 			}
 		}
 	}

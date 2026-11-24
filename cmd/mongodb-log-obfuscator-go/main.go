@@ -267,6 +267,10 @@ func obfuscate(args []string) error {
 	printMessages("Warning for", summary.Warnings, inputRoot)
 	printMessages("Failed (not written)", summary.Failures, inputRoot)
 	fmt.Fprintf(os.Stderr, "Discovered %d replacements in %s\n", summary.Replacements, summary.DiscoverTime.Round(time.Millisecond))
+	if summary.OrgLabels > 0 {
+		// Names stay out of the terminal: they are customer data.
+		fmt.Fprintf(os.Stderr, "Organization names from domains: %d, replaced in any case (check the \"org\" section of the mapping for common words)\n", summary.OrgLabels)
+	}
 	fmt.Fprintf(os.Stderr, "Payload redaction: enabled\n")
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "Dry run complete. No files written.\n")

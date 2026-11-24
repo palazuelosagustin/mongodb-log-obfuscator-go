@@ -264,6 +264,18 @@ pools, listener sockets) are mapped like values. Lines with a syslog/journald,
 mapped as text. X.509 subjects are replaced whole, and LDAP `dc=`, `o=`, `cn=`
 and `uid=` values are mapped.
 
+The organization name inside customer domains is replaced on its own too: the
+label before the public suffix (`acme` of `db1.acme.com` or `acme.co.uk`)
+becomes `OrganizationN`, like LDAP organization names. Organization names of 4
+or more letters are matched in any case wherever no letter touches them, so
+`ACME_reports`, `Acme-EU`, `agent-acme1-prod` and `acmeCorp` are replaced
+(`acme1` becomes `Organization1_1`) and `academy` or `macmed` are not. Labels of
+platform suffixes (`mongodb.net`, `amazonaws.com`, `ec2.internal`, ...), vendor
+names and generic words (`corp`, `prod`, `internal`, ...) are not taken; a
+label already mapped as a host, database or collection name keeps that
+mapping. The run summary prints how many were found: check the `org` section
+of the mapping for a label that is a common word.
+
 This includes scalar values under fields such as `documents`, `updates`,
 `deletes`, `query`, `filter`, `update`, `pipeline`, `let`, `q`, `u`, `template`,
 `channelOptions`, `content`, `body`, `html`, `text`, `emailBody`, and `smsBody`
