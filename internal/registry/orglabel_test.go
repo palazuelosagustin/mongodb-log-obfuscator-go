@@ -68,3 +68,32 @@ func TestOrgLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeFoldsOrgCaseAndSkipsPublicCAs(t *testing.T) {
+	c := NewCollector()
+	c.Register("org", "Cisco")
+	c.Register("org", "cisco")
+	c.Register("org", "IdenTrust")
+	c.Register("org", "DigiCert Inc")
+	c.Register("org", "Let's Encrypt")
+	c.Register("org", "ab") // too short for a label: kept exactly
+	c.Register("org", "AB")
+	c.Register("fqdn", "ocsp.identrust.com")
+	r := New()
+	r.MergeCollectors([]*Collector{c})
+	org := r.Categories["org"]
+	if len(org) != 3 || org["Cisco"] == "" || org["ab"] == "" || org["AB"] == "" {
+		t.Fatalf("org = %v, want Cisco, ab and AB only", org)
+	}
+}
+
+func TestPublicCA(t *testing.T) {
+	for name, want := range map[string]bool{
+		"IdenTrust": true, "DigiCert Inc": true, "Let's Encrypt": true, "Sectigo Limited": true,
+		"GlobalSign nv-sa": true, "Cisco": false, "Acme Trust": false,
+	} {
+		if got := PublicCA(name); got != want {
+			t.Errorf("PublicCA(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
