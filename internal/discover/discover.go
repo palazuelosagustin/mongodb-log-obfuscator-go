@@ -396,6 +396,7 @@ func (s *Scanner) discoverConnString(val string) {
 	}
 }
 func (s *Scanner) discoverFreetext(text string) {
+	s.discoverIndexText(text)
 	for _, email := range reEmail.FindAllString(text, -1) {
 		s.register("email", email)
 		if parts := strings.SplitN(email, "@", 2); len(parts) == 2 {
@@ -527,6 +528,91 @@ func (s *Scanner) discoverBSONDocument(text string) {
 	}
 }
 
+// Index names are mapped whole to indexN: they often embed collection names
+// and business terms. The namespace on the same line ties an index to its
+// collection. "_id_" (every collection has it) and "*" (all indexes, in
+// dropIndexes) stay.
+//
+// indexNameKeys hold an index name or a list of them; indexSpecKeys hold
+// index specs (one or a list) whose "name" is an index name.
+var (
+	indexNameKeys = set("index", "indexName", "hint", "indexesBuilt")
+	indexSpecKeys = set("indexes", "properties", "spec")
+)
+
+func (s *Scanner) discoverIndexNames(key string, val any) {
+	switch {
+	case has(indexNameKeys, key):
+		switch v := val.(type) {
+		case string:
+			s.registerIndex(v)
+		case []any:
+			for _, item := range v {
+				if name, ok := item.(string); ok {
+					s.registerIndex(name)
+				}
+			}
+		}
+	case has(indexSpecKeys, key):
+		specs, ok := val.([]any)
+		if !ok {
+			specs = []any{val}
+		}
+		for _, spec := range specs {
+			if m, ok := spec.(map[string]any); ok {
+				if name, ok := m["name"].(string); ok {
+					s.registerIndex(name)
+				}
+			}
+		}
+	}
+}
+
+func (s *Scanner) registerIndex(name string) {
+	if name != "" && name != "_id_" && name != "*" && !strings.HasPrefix(name, "$") {
+		s.register("index", name)
+	}
+}
+
+// Index names in server error messages: E11000 duplicate key errors, and
+// dropIndexes and createIndexes failures.
+var reIndexInText = regexp.MustCompile(`\bindex: (\S+) dup key|index not found with name \[([^\]]+)\]|[Ii]ndex with name: (\S+) already exists`)
+
+func (s *Scanner) discoverIndexText(text string) {
+	if !strings.Contains(text, "ndex") {
+		return
+	}
+	for _, m := range reIndexInText.FindAllStringSubmatch(text, -1) {
+		for _, name := range m[1:] {
+			s.registerIndex(name)
+		}
+	}
+}
+
+// bsonToAny converts the top two levels of a BSON value to the JSON shapes
+// discoverIndexNames reads.
+func bsonToAny(v any) any {
+	switch x := v.(type) {
+	case bson.D:
+		m := make(map[string]any, len(x))
+		for _, e := range x {
+			switch e.Value.(type) {
+			case bson.D, bson.A:
+			default:
+				m[e.Key] = e.Value
+			}
+		}
+		return m
+	case bson.A:
+		out := make([]any, len(x))
+		for i, item := range x {
+			out[i] = bsonToAny(item)
+		}
+		return out
+	}
+	return v
+}
+
 func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 	if depth > 20 {
 		return
@@ -540,6 +626,7 @@ func (s *Scanner) deepDiscover(obj any, depth int, inCommand bool) {
 			if has(skipKeys, key) || redact.DocumentContainer(key) {
 				continue
 			}
+			s.discoverIndexNames(key, val)
 			child := inCommand || redact.CommandContext(key)
 			if child && key == "pipeline" {
 				s.discoverPipeline(val)
@@ -687,6 +774,7 @@ func (s *Scanner) deepDiscoverBSON(doc bson.D, depth int, inCommand bool) {
 		if has(skipKeys, elem.Key) || redact.DocumentContainer(elem.Key) {
 			continue
 		}
+		s.discoverIndexNames(elem.Key, bsonToAny(elem.Value))
 		child := inCommand || redact.CommandContext(elem.Key)
 		if redact.PayloadField(elem.Key, elem.Value, child) {
 			continue

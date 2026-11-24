@@ -36,7 +36,7 @@ type Collector struct {
 	Values map[string]map[string]struct{}
 }
 
-var categories = []string{"hostname", "fqdn", "domain", "ip", "database", "collection", "replset", "shard", "user", "email", "path", "cert_subject", "org", "location", "java_class", "appname", "data", "zone", "hostlabel", "subnet_private", "subnet_public"}
+var categories = []string{"hostname", "fqdn", "domain", "ip", "database", "collection", "index", "replset", "shard", "user", "email", "path", "cert_subject", "org", "location", "java_class", "appname", "data", "zone", "hostlabel", "subnet_private", "subnet_public"}
 
 // Hidden categories build replacements (domain labels, short host labels,
 // /24 subnets) and are kept in the mapping so later runs stay consistent,
@@ -75,7 +75,7 @@ func (c *Collector) Register(category, value string) {
 
 // priority decides the category of a value discovered in several: a replica
 // set name seen in free text is still a replica set name.
-var priority = []string{"replset", "shard", "database", "collection", "user", "email", "cert_subject", "fqdn", "hostname", "domain", "ip", "path", "appname", "org", "location", "java_class", "data"}
+var priority = []string{"replset", "shard", "database", "collection", "index", "user", "email", "cert_subject", "fqdn", "hostname", "domain", "ip", "path", "appname", "org", "location", "java_class", "data"}
 
 // Merge adds the values of other.
 func (c *Collector) Merge(other *Collector) {
@@ -383,6 +383,8 @@ func template(category string, n int) string {
 		return "database" + num
 	case "collection":
 		return "collection" + num
+	case "index":
+		return "index" + num
 	case "replset":
 		return "replset" + num
 	case "shard":

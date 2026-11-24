@@ -437,6 +437,9 @@ func (c *checker) check(s, where, key, rel string, lineNo int, path string) {
 		if o.token && !replace.TokenBoundary(s, start, end) {
 			return
 		}
+		if o.category == "index" && key == "planSummary" {
+			return // a field of the key pattern; the obfuscator keeps it too
+		}
 		if where == "key" && !keyLeak(o, s, key, start, end) {
 			return
 		}
