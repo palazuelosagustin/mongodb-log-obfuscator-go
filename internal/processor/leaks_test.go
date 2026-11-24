@@ -95,3 +95,43 @@ func TestRunRemovesKnownLeaks(t *testing.T) {
 		t.Fatalf("mapping mode %v, want 0600", info.Mode().Perm())
 	}
 }
+
+// UUIDs identify connections, collections and index builds; they are kept
+// whole even when their all-digit groups look like a card number.
+func TestRunKeepsUUIDs(t *testing.T) {
+	lines := []string{
+		`{"t":{"$date":"2026-11-01T10:00:00.000Z"},"s":"I","c":"INDEX","id":20384,"ctx":"IndexBuildsCoordinatorMongod-0","msg":"Index build: starting","attr":{"ns":"shop.orders","buildUUID":{"uuid":{"$uuid":"61949369-6126-4783-8c4e-d2211f649f53"}},"collectionUUID":{"uuid":{"$uuid":"12340008-1234-1234-abcd-0123456789ab"}},"method":"Hybrid"}}`,
+		`{"t":{"$date":"2026-11-01T10:00:01.000Z"},"s":"I","c":"STORAGE","id":20320,"ctx":"conn1","msg":"createCollection","attr":{"namespace":"shop.orders","uuidDisposition":"generated","uuid":{"uuid":{"$uuid":"abcdef01-abcd-ef01-1234-123456780002"}}}}`,
+		`{"t":{"$date":"2026-11-01T10:00:02.000Z"},"s":"W","c":"INDEX","id":20441,"ctx":"conn2","msg":"Failed","attr":{"error":"index build 61949369-6126-4783-8c4e-d2211f649f53 aborted, card 4111 1111 1111 1111"}}`,
+	}
+	root := t.TempDir()
+	in := filepath.Join(root, "in", "mongod.log")
+	if err := os.MkdirAll(filepath.Dir(in), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := Run(Config{Files: []inputs.File{{Path: in, Type: inputs.Log}}, InputRoot: filepath.Dir(in), OutputRoot: filepath.Join(root, "out"), MappingPath: filepath.Join(root, "out_mapping.json"), Jobs: 1, Registry: registry.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(summary.Outputs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"buildUUID":{"uuid":{"$uuid":"61949369-6126-4783-8c4e-d2211f649f53"}}`,
+		`"collectionUUID":{"uuid":{"$uuid":"12340008-1234-1234-abcd-0123456789ab"}}`,
+		`"$uuid":"abcdef01-abcd-ef01-1234-123456780002"`,
+		`index build 61949369-6126-4783-8c4e-d2211f649f53 aborted, card obfuscated-number`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("output lost %s\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "4111") {
+		t.Errorf("card number remains in output:\n%s", text)
+	}
+}

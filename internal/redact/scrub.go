@@ -12,6 +12,10 @@ var reDupKey = regexp.MustCompile(`dup key: \{[^{}]*\}`)
 var reDupKeyValue = regexp.MustCompile(`(\b[\w.$]+): ("(?:[^"\\]|\\.)*"|[^,}]+)`)
 var reCardLike = regexp.MustCompile(`\b\d(?:[ -]?\d){12,18}\b`)
 
+// reUUID finds UUIDs inside text. Their groups can be all digits, and three
+// such groups in a row look like a card number to reCardLike.
+var reUUID = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+
 // ScrubText removes values that free text (error messages, comments, log
 // prefixes) can carry and the mapping cannot know in advance: the key values
 // of duplicate-key errors and card-like numbers (13-19 digits passing the
@@ -30,16 +34,50 @@ func ScrubText(s string) (string, int) {
 			return "dup key: {" + inner + "}"
 		})
 	}
-	if digitCount(s) >= 13 {
-		s = reCardLike.ReplaceAllStringFunc(s, func(m string) string {
-			if !LuhnCard(m) {
-				return m
-			}
+	if spans := CardNumbers(s); len(spans) > 0 {
+		var b strings.Builder
+		last := 0
+		for _, sp := range spans {
+			b.WriteString(s[last:sp[0]])
+			b.WriteString(NumberPlaceholder)
+			last = sp[1]
 			count++
-			return NumberPlaceholder
-		})
+		}
+		b.WriteString(s[last:])
+		s = b.String()
 	}
 	return s, count
+}
+
+// CardNumbers returns the [start, end) spans of card-like numbers in s:
+// 13-19 digits, optionally separated by spaces or dashes, that pass the Luhn
+// check and are not part of a UUID. UUIDs are kept whole because they
+// identify connections, collections and index builds.
+func CardNumbers(s string) [][2]int {
+	if digitCount(s) < 13 {
+		return nil
+	}
+	var uuids [][]int
+	if strings.Count(s, "-") >= 4 {
+		uuids = reUUID.FindAllStringIndex(s, -1)
+	}
+	var out [][2]int
+	for _, m := range reCardLike.FindAllStringIndex(s, -1) {
+		if insideAny(m, uuids) || !LuhnCard(s[m[0]:m[1]]) {
+			continue
+		}
+		out = append(out, [2]int{m[0], m[1]})
+	}
+	return out
+}
+
+func insideAny(m []int, spans [][]int) bool {
+	for _, sp := range spans {
+		if m[0] < sp[1] && sp[0] < m[1] {
+			return true
+		}
+	}
+	return false
 }
 
 // LuhnCard reports whether s (digits with optional spaces or dashes) has
