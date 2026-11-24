@@ -6,6 +6,10 @@ README.
 
 ## Unreleased
 
+- The skills moved to `skills/.claude/SKILL.md` and `skills/.codex/SKILL.md`.
+  Re-link an installed skill:
+  `ln -sfn ~/bin/mongodb-log-obfuscator-go/skills/.claude ~/.claude/skills/mongodb-log-obfuscator-go`.
+
 ## v0.2.0 - 2026-11-24
 
 - Organization names that differ only in case ("Cisco" from a certificate,

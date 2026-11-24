@@ -19,11 +19,11 @@ func TestREADMEAndSkillMatchCLI(t *testing.T) {
 			t.Errorf("README does not document %s", flag)
 		}
 	}
-	skill, err := os.ReadFile("../../skills/.claude/mongodb-log-obfuscator-go/SKILL.md")
+	skill, err := os.ReadFile("../../skills/.claude/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	codex, err := os.ReadFile("../../skills/.codex/mongodb-log-obfuscator-go/SKILL.md")
+	codex, err := os.ReadFile("../../skills/.codex/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
 	}
